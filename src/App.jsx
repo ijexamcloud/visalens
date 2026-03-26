@@ -9,8 +9,13 @@ import {
   Moon, Pencil, Plus, Printer, RefreshCw, Save, Search, Send, ShieldCheck, Star, Sun,
   Target, Trash2, TriangleAlert, Upload, User, X, XCircle, ZoomIn, Dot
 } from 'lucide-react';
-
+ 
+ import { createClient } from '@supabase/supabase-js';
 const PROXY_URL = "/.netlify/functions/proxy";
+const supabase = createClient(
+  import.meta.env.VITE_SUPABASE_URL,
+  import.meta.env.VITE_SUPABASE_ANON_KEY
+);
 
 const DARK_VARS = {
   "--bg":   "#0F1E3C",
@@ -912,6 +917,8 @@ function ProfileCard({ data, setData, preferredOfferIndex, setPreferredOfferInde
       {k:"nationality",    l:"Nationality"},
       {k:"passportNumber", l:"Passport No."},
       {k:"passportExpiry", l:"Passport Expiry"},
+	  {k:"cnicNumber",     l:"CNIC Number"},
+	  {k:"cnicExpiry",     l:"CNIC Expiry"},
     ]},
     { group: "Academic Background", fields: [
       {k:"program",        l:"Highest Qualification", w:true},
@@ -923,8 +930,8 @@ function ProfileCard({ data, setData, preferredOfferIndex, setPreferredOfferInde
       {k:"ieltsScore",        l:"IELTS Score"},
       {k:"toeflScore",        l:"TOEFL Score"},
       {k:"pteScore",          l:"PTE Score"},
-      {k:"otherEnglishTest",  l:"Other English Test / Cert", w:true, placeholder:"No test/certification found"},
-      {k:"mediumOfInstruction", l:"Medium of Instruction", w:true, placeholder:"Not found"},
+      {k:"otherEnglishTest",  l:"Other English Test / Certificate", w:true, multiline:true, placeholder:"No test/certification found"},
+      {k:"mediumOfInstruction", l:"Medium of Instruction", w:true, multiline:true, placeholder:"Not found"},
     ]},
     { group: "Financial", fields: [
       {k:"financialHolder",  l:"Account Holder"},
@@ -1006,10 +1013,61 @@ function ProfileCard({ data, setData, preferredOfferIndex, setPreferredOfferInde
         ))}
         {/* Offer Letters */}
         <OfferLettersSection data={data} setData={setData} preferredIdx={preferredOfferIndex} setPreferredIdx={setPreferredOfferIndex}/>
+             
+	 {/* Detected Special Documents */}
+{Array.isArray(data.detectedDocs) && data.detectedDocs.length > 0 && (
+  <div className="pgroup">
+    <div className="pgroup-label" style={{display:"flex",alignItems:"center",gap:8}}>
+      Detected Special Documents
+      <span className="badge b-info" style={{fontSize:9}}>{data.detectedDocs.length} found</span>
+    </div>
+    <div style={{display:"flex",flexDirection:"column",gap:8}}>
+      {data.detectedDocs.map((doc, i) => (
+        <div key={i} style={{background:"var(--s2)",border:"1px solid var(--bd)",borderRadius:"var(--r2)",padding:"10px 12px"}}>
+          <div style={{fontSize:11,fontWeight:700,color:"var(--p)",textTransform:"uppercase",letterSpacing:".06em",marginBottom:6}}>
+            {doc.type}
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+            {doc.reference  && <div><div className="plbl">Reference</div><div style={{fontSize:12,fontWeight:600,color:"var(--t1)"}}>{doc.reference}</div></div>}
+            {doc.amount     && <div><div className="plbl">Amount</div><div style={{fontSize:12,fontWeight:600,color:"var(--t1)"}}>{doc.amount}</div></div>}
+            {doc.date       && <div><div className="plbl">Date</div><div style={{fontSize:12,fontWeight:600,color:"var(--t1)"}}>{doc.date}</div></div>}
+            {doc.expiry     && <div><div className="plbl">Expiry</div><div style={{fontSize:12,fontWeight:600,color:"var(--t1)"}}>{doc.expiry}</div></div>}
+            {doc.result     && <div><div className="plbl">Result</div><div style={{fontSize:12,fontWeight:600,color:doc.result==="Clear"?"var(--ok)":"var(--err)"}}>{doc.result}</div></div>}
+            {doc.institution&& <div style={{gridColumn:"1/-1"}}><div className="plbl">Institution</div><div style={{fontSize:12,fontWeight:600,color:"var(--t1)"}}>{doc.institution}</div></div>}
+            {doc.notes      && <div style={{gridColumn:"1/-1"}}><div className="plbl">Notes</div><div style={{fontSize:12,color:"var(--t2)",fontFamily:"var(--fm)"}}>{doc.notes}</div></div>}
+          </div>
+        </div>
+      ))}
+    </div>
+  </div>
+)}
+	{/* Name Mismatches */}
+{Array.isArray(data.nameMismatches) && data.nameMismatches.length > 0 && (
+  <div className="pgroup">
+    <div className="pgroup-label" style={{display:"flex",alignItems:"center",gap:8}}>
+      Name Mismatches Detected
+      <span className="badge b-err" style={{fontSize:9}}>{data.nameMismatches.length} mismatch{data.nameMismatches.length!==1?"es":""}</span>
+    </div>
+    <div style={{display:"flex",flexDirection:"column",gap:6}}>
+      {data.nameMismatches.map((m, i) => (
+        <div key={i} style={{background:"rgba(220,38,38,.05)",border:"1px solid rgba(220,38,38,.2)",borderRadius:"var(--r1)",padding:"9px 12px"}}>
+          <div style={{fontSize:11,fontWeight:700,color:"var(--err)",marginBottom:4}}>{m.doc}</div>
+          <div style={{fontSize:12,color:"var(--t1)",fontWeight:600,marginBottom:2}}>Found: "{m.nameFound}"</div>
+          <div style={{fontSize:11,color:"var(--t2)",fontFamily:"var(--fm)"}}>{m.issue}</div>
+        </div>
+      ))}
+      <div style={{display:"flex",alignItems:"flex-start",gap:8,padding:"8px 10px",background:"var(--warng)",border:"1px solid rgba(180,83,9,.2)",borderRadius:"var(--r1)",fontSize:11,color:"var(--warn)",fontFamily:"var(--fm)",lineHeight:1.5}}>
+        <span style={{flexShrink:0,marginTop:1}}>⚠️</span>
+        <span>Name mismatches must be resolved before visa submission. A statutory declaration or affidavit may be required.</span>
       </div>
     </div>
+  </div>
+)}
+    </div>
+	</div>
   );
 }
+	
 
 /* ─── SIDEBAR DOC CHECKLIST (hybrid: auto-detection from classifications + manual override) ── */
 function SidebarDocChecklist({ profile, preferredOfferIndex, docs, docTypes }) {
@@ -1723,17 +1781,49 @@ function FlagsCard({ flags }) {
     </div>
   );
 }
-function NotesCard({ notes, setNotes, onSave, onSaveCase, savedMsg }) {
+function NotesCard({ notes, setNotes, onSave, onSaveCase, savedMsg, counsellorName, setCounsellorName, cases }) {
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const existingNames = [...new Set((cases||[]).map(c => c.counsellorName).filter(Boolean))];
+  const suggestions = counsellorName.trim()
+    ? existingNames.filter(n => n.toLowerCase().includes(counsellorName.toLowerCase()) && n !== counsellorName)
+    : [];
+
   return (
     <div className="rc">
       <div className="rc-hdr"><div className="rc-ico"><FileText size={14} color="#4A5D7E"/></div><span className="rc-ttl">Counselor Notes</span></div>
       <div className="rc-body">
+        <div style={{marginBottom:8,position:"relative"}}>
+          <div style={{fontSize:11,color:"var(--t3)",marginBottom:4,fontWeight:600,textTransform:"uppercase",letterSpacing:".05em"}}>Your Name</div>
+          <input
+            className="notes-input"
+            style={{width:"100%",fontSize:13}}
+            placeholder="e.g. Sara Ahmed"
+            value={counsellorName}
+            onChange={e => { setCounsellorName(e.target.value); setShowSuggestions(true); }}
+            onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
+            onFocus={() => setShowSuggestions(true)}
+          />
+          {showSuggestions && suggestions.length > 0 && (
+            <div style={{position:"absolute",top:"100%",left:0,right:0,background:"var(--bg)",border:"1px solid var(--bdr)",borderRadius:6,zIndex:100,boxShadow:"0 4px 12px rgba(0,0,0,0.1)"}}>
+              {suggestions.map(name => (
+                <div
+                  key={name}
+                  onMouseDown={() => { setCounsellorName(name); setShowSuggestions(false); }}
+                  style={{padding:"8px 12px",fontSize:13,cursor:"pointer",borderBottom:"1px solid var(--bdr)"}}
+                  onMouseEnter={e => e.currentTarget.style.background="var(--hover)"}
+                  onMouseLeave={e => e.currentTarget.style.background=""}
+                >
+                  {name}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
         <label style={{display:"block",fontSize:12,color:"var(--t3)",fontFamily:"var(--fm)",marginBottom:8}}>Follow-up actions, concerns, next steps</label>
         <textarea className="notes-area" placeholder="Add notes…" value={notes} onChange={e=>setNotes(e.target.value)}/>
         <div className="notes-acts">
           {savedMsg&&<span className="saved-msg"><Check size={12}/>{savedMsg}</span>}
           <div className="notes-sp"/>
-          <button className="btn-s" onClick={onSave}><Save size={13}/>Save Notes</button>
           <button className="btn-o" onClick={onSaveCase}><FolderOpen size={13}/>Save to History</button>
         </div>
       </div>
@@ -1756,59 +1846,161 @@ function Skeleton() {
 }
 
 /* ─── CASE HISTORY ───────────────────────────────────────────────── */
-function CaseHistory({ cases, onLoad, onDelete }) {
+function CaseHistory({ cases, onLoad, onDelete, onRenameCounsellor }) {
   const [exp, setExp] = useState(null);
-  if (!cases.length) return (
-    <div className="no-cases">
-      <FolderOpen size={36} color="#94A3B8" style={{margin:"0 auto 14px"}}/>
-      <div style={{fontSize:"1.1rem",fontWeight:700,color:"var(--t2)",marginBottom:8}}>No cases saved yet</div>
-      <div style={{fontSize:12,color:"var(--t3)",fontFamily:"var(--fm)"}}>Analyse documents → click "Save to History"</div>
-    </div>
-  );
+  const [search, setSearch] = useState("");
+  const [counsellorFilter, setCounsellorFilter] = useState("All");
+  const [renaming, setRenaming] = useState(false);
+  const [renameVal, setRenameVal] = useState("");
+
+  const counsellorOptions = ["All", ...new Set(cases.map(c => c.counsellorName).filter(Boolean))];
+
+  async function handleRename() {
+    if (!renameVal.trim() || counsellorFilter === "All") return;
+    await onRenameCounsellor(counsellorFilter, renameVal.trim());
+    setCounsellorFilter("All");
+    setRenaming(false);
+    setRenameVal("");
+  }
+  const filtered = cases.filter(c => {
+    const matchesCounsellor = counsellorFilter === "All" || c.counsellorName === counsellorFilter;
+    if (!matchesCounsellor) return false;
+    if (!search.trim()) return true;
+    const q = search.toLowerCase();
+    const name = (c.profile?.fullName || '').toLowerCase();
+    const country = (c.targetCountry || c.profile?.targetCountry || '').toLowerCase();
+    const counsellor = (c.counsellorName || '').toLowerCase();
+    return name.includes(q) || country.includes(q) || counsellor.includes(q);
+  });
+  
   return (
-    <div className="history">
-      {cases.map(c => (
-        <div key={c.id} className="case-card">
-          <div className="case-hdr" onClick={()=>setExp(exp===c.id?null:c.id)} role="button" tabIndex={0} onKeyDown={e=>e.key==="Enter"&&setExp(exp===c.id?null:c.id)}>
-            <div className="case-av"><User size={18}/></div>
-            <div className="case-info">
-              <div className="case-name">{c.profile?.fullName||c.results.studentProfile.fullName||"Unknown Student"}</div>
-              <div className="case-meta">{[c.profile?.nationality||c.results.studentProfile.nationality,c.profile?.targetCountry||c.results.studentProfile.targetCountry].filter(Boolean).join(" · ")} · <span style={{opacity:.6}}>{new Date(c.savedAt).toLocaleDateString()}</span></div>
+    <div>
+      <div className="rc" style={{marginBottom:16,padding:"14px 16px"}}>
+        <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
+          <div style={{flex:1,minWidth:180}}>
+            <div style={{fontSize:11,color:"var(--t3)",marginBottom:4,fontWeight:600,textTransform:"uppercase",letterSpacing:".05em"}}>Filter by Counsellor</div>
+            <div style={{display:"flex",gap:6,alignItems:"center"}}>
+              <select
+                className="notes-input"
+                style={{flex:1,fontSize:13}}
+                value={counsellorFilter}
+                onChange={e => { setCounsellorFilter(e.target.value); setRenaming(false); setRenameVal(""); }}
+              >
+                {counsellorOptions.map(name => (
+                  <option key={name} value={name}>{name}</option>
+                ))}
+              </select>
+              {counsellorFilter !== "All" && !renaming && (
+                <button className="btn-s" style={{whiteSpace:"nowrap"}} onClick={() => { setRenaming(true); setRenameVal(counsellorFilter); }}>
+                  ✏️ Rename
+                </button>
+              )}
             </div>
-            <div className="case-r">
-              <span className={`badge ${scoreBadge(c.results.eligibility.overallScore)}`}>{c.results.eligibility.overallScore}/100</span>
-              <ChevronDown size={14} className={`chev${exp===c.id?" open":""}`}/>
+            {renaming && (
+              <div style={{display:"flex",gap:6,marginTop:6}}>
+                <input
+                  className="notes-input"
+                  style={{flex:1,fontSize:13}}
+                  value={renameVal}
+                  onChange={e => setRenameVal(e.target.value)}
+                  placeholder="New name…"
+                />
+                <button className="btn-s" onClick={handleRename}>✓</button>
+                <button className="btn-s" onClick={() => { setRenaming(false); setRenameVal(""); }}>✕</button>
+              </div>
+            )}
+          </div>
+          <div style={{flex:2,minWidth:200}}>
+            <div style={{fontSize:11,color:"var(--t3)",marginBottom:4,fontWeight:600,textTransform:"uppercase",letterSpacing:".05em"}}>Search Cases</div>
+            <div style={{position:"relative"}}>
+              <Search size={13} style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",color:"var(--t3)"}}/>
+              <input
+                className="notes-input"
+                style={{width:"100%",fontSize:13,paddingLeft:30}}
+                placeholder="Search by student name, country, counsellor…"
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+              />
             </div>
           </div>
-          {exp===c.id&&(
-            <div className="case-body">
-              <div className="mini-grid">
-                {[
-                  {l:"Passport",v:c.profile?.passportNumber||c.results.studentProfile.passportNumber},
-                  {l:"Expiry",  v:c.profile?.passportExpiry||c.results.studentProfile.passportExpiry},
-                  {l:"IELTS",   v:c.profile?.ieltsScore||"—"},
-                  {l:"Balance", v:c.profile?.financialBalance||c.results.studentProfile.financialBalance},
-                  {l:"Academic",v:c.profile?.academicResult||c.results.studentProfile.academicResult},
-                  {l:"Flags",   v:`${c.results.redFlags?.length||0} issues`},
-                ].map(f=><div key={f.l} className="mini-f"><div className="mini-l">{f.l}</div><div className={`mini-v${!f.v||f.v==="Not found"?" e":""}`}>{f.v||"—"}</div></div>)}
-              </div>
-              <div className="sec-lbl">Counselor Notes</div>
-              {c.notes?<div className="case-notes-txt">{c.notes}</div>:<div className="case-no-notes">No notes recorded.</div>}
-              <div className="case-acts">
-                <button className="btn-s" onClick={()=>onLoad(c)}><ArrowUpRight size={13}/>Open Full Analysis</button>
-                <button className="btn-s" onClick={() => window.print()}><Printer size={13}/>Export PDF</button>
-                <button className="btn-danger" onClick={()=>onDelete(c.id)}><Trash2 size={13}/>Delete</button>
-              </div>
-            </div>
-          )}
         </div>
-      ))}
+      </div>
+
+      {!filtered.length ? (
+        <div className="no-cases">
+          <FolderOpen size={36} color="#94A3B8" style={{margin:"0 auto 14px"}}/>
+          <div style={{fontSize:"1.1rem",fontWeight:700,color:"var(--t2)",marginBottom:8}}>
+            {cases.length ? "No cases match your search" : "No cases saved yet"}
+          </div>
+          <div style={{fontSize:12,color:"var(--t3)",fontFamily:"var(--fm)"}}>
+            {cases.length ? "Try a different search term" : "Analyse documents → click \"Save to History\""}
+          </div>
+        </div>
+      ) : (
+        <div className="history">
+          {filtered.map(c => {
+            const profile = c.profile || c.results?.studentProfile || {};
+            const score = c.overallScore || c.results?.eligibility?.overallScore || 0;
+            const flags = c.results?.redFlags?.length || 0;
+            const country = c.targetCountry || profile.targetCountry || '—';
+            const offers = Array.isArray(profile.offerLetters) ? profile.offerLetters : [];
+            const offerCountry = offers[0]?.country || country;
+            return (
+              <div key={c.id} className="case-card">
+                <div className="case-hdr" onClick={() => setExp(exp === c.id ? null : c.id)} role="button" tabIndex={0} onKeyDown={e => e.key === "Enter" && setExp(exp === c.id ? null : c.id)}>
+                  <div className="case-av"><User size={18}/></div>
+                  <div className="case-info">
+                    <div className="case-name">{profile.fullName || 'Unknown Student'}</div>
+                    <div className="case-meta">
+                      {offerCountry} · {new Date(c.savedAt).toLocaleDateString()}
+                      {c.counsellorName && <span style={{opacity:.6}}> · {c.counsellorName}</span>}
+                    </div>
+                  </div>
+                  <div className="case-r">
+                    <span className={`badge ${scoreBadge(score)}`}>{score}/100</span>
+                    <ChevronDown size={14} className={`chev${exp === c.id ? " open" : ""}`}/>
+                  </div>
+                </div>
+                {exp === c.id && (
+                  <div className="case-body">
+                    <div className="mini-grid">
+                      {[
+                        {l:"Passport", v:profile.passportNumber},
+                        {l:"Expiry",   v:profile.passportExpiry},
+                        {l:"IELTS",    v:profile.ieltsScore},
+                        {l:"Balance",  v:profile.financialBalance},
+                        {l:"Program",  v:profile.program},
+                        {l:"Flags",    v:`${flags} issue${flags !== 1 ? 's' : ''}`},
+                      ].map(f => (
+                        <div key={f.l} className="mini-f">
+                          <div className="mini-l">{f.l}</div>
+                          <div className={`mini-v${!f.v || f.v === "Not found" ? " e" : ""}`}>{f.v || "—"}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="sec-lbl">Counsellor Notes</div>
+                    {c.notes ? <div className="case-notes-txt">{c.notes}</div> : <div className="case-no-notes">No notes recorded.</div>}
+                    <div className="case-acts">
+                      <button className="btn-s" onClick={() => onLoad(c)}><ArrowUpRight size={13}/>Open Full Analysis</button>
+                      <button className="btn-danger" onClick={() => onDelete(c.id)}><Trash2 size={13}/>Delete</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
 
 /* ─── DASHBOARD ──────────────────────────────────────────────────── */
 function Dashboard({ cases, onLoad }) {
+  const [counsellorFilter, setCounsellorFilter] = useState("All");
+  const counsellorOptions = ["All", ...new Set(cases.map(c => c.counsellorName).filter(Boolean))];
+  const filtered = counsellorFilter === "All" ? cases : cases.filter(c => c.counsellorName === counsellorFilter);
+
   if (!cases.length) return (
     <div className="no-dash">
       <LayoutDashboard size={36} color="#94A3B8" style={{margin:"0 auto 14px"}}/>
@@ -1816,12 +2008,27 @@ function Dashboard({ cases, onLoad }) {
       <div style={{fontSize:12,color:"var(--t3)",fontFamily:"var(--fm)"}}>Cases you save will appear here with status tracking</div>
     </div>
   );
-  const total   = cases.length;
-  const strong  = cases.filter(c=>c.results.eligibility.overallScore>=70).length;
-  const weak    = cases.filter(c=>c.results.eligibility.overallScore<45).length;
-  const flagged = cases.filter(c=>c.results.redFlags?.length>0).length;
+  const total   = filtered.length;
+  const strong  = filtered.filter(c=>c.results.eligibility.overallScore>=70).length;
+  const weak    = filtered.filter(c=>c.results.eligibility.overallScore<45).length;
+  const flagged = filtered.filter(c=>c.results.redFlags?.length>0).length;
   return (
     <>
+      {counsellorOptions.length > 1 && (
+        <div style={{marginBottom:16,display:"flex",alignItems:"center",gap:10}}>
+          <div style={{fontSize:11,color:"var(--t3)",fontWeight:600,textTransform:"uppercase",letterSpacing:".05em"}}>Filter by Counsellor</div>
+          <select
+            className="notes-input"
+            style={{fontSize:13,minWidth:180}}
+            value={counsellorFilter}
+            onChange={e => setCounsellorFilter(e.target.value)}
+          >
+            {counsellorOptions.map(name => (
+              <option key={name} value={name}>{name}</option>
+            ))}
+          </select>
+        </div>
+      )}
       <div className="dash-stats">
         <div className="stat-card"><div className="stat-num">{total}</div><div className="stat-lbl">Total Students</div></div>
         <div className="stat-card"><div className="stat-num" style={{color:"var(--ok)"}}>{strong}</div><div className="stat-lbl">Strong Eligibility</div></div>
@@ -1836,7 +2043,7 @@ function Dashboard({ cases, onLoad }) {
           <div className="dash-col-hdr">Flags</div>
           <div className="dash-col-hdr">Saved</div>
         </div>
-        {cases.map(c=>{
+        {filtered.map(c=>{
           const name    = c.profile?.fullName||c.results.studentProfile.fullName||"Unknown";
           const prog    = c.profile?.program||c.results.studentProfile.program||"—";
           const country = c.profile?.targetCountry||c.results.studentProfile.targetCountry||"—";
@@ -1903,7 +2110,21 @@ function buildChatContext(profileData, results, docs) {
     "=== RED FLAGS ===",
     (results.redFlags||[]).map(f=>`[${f.severity?.toUpperCase()}] ${f.flag} — ${f.detail}`).join("\n") || "None",
     "",
-    "=== REJECTIONS / DEFERMENTS ===",
+	"=== DETECTED SPECIAL DOCUMENTS ===",
+	(profileData?.detectedDocs?.length
+	? profileData.detectedDocs.map(d =>
+      `- ${d.type}${d.reference ? ` | Ref: ${d.reference}` : ""}${d.amount ? ` | Amount: ${d.amount}` : ""}${d.date ? ` | Date: ${d.date}` : ""}${d.expiry ? ` | Expiry: ${d.expiry}` : ""}${d.result ? ` | Result: ${d.result}` : ""}${d.institution ? ` | Institution: ${d.institution}` : ""}${d.notes ? ` | Notes: ${d.notes}` : ""}`
+    ).join("\n")
+  : "None detected"),
+	"",   
+	"=== NAME MISMATCHES ===",
+	(profileData?.nameMismatches?.length
+	? profileData.nameMismatches.map(m =>
+      `- ${m.doc}: Found "${m.nameFound}" — ${m.issue}`
+    ).join("\n")
+  : "None detected"),
+	"",
+   "=== REJECTIONS / DEFERMENTS ===",
     (results.rejections||[]).map(r=>`${r.type} — ${r.country||""} ${r.university||""} ${r.program||""} (${r.date||"no date"}): ${r.reason||""}`).join("\n") || "None found",
     "",
     "=== UPLOADED DOCUMENTS ===",
@@ -1925,9 +2146,16 @@ const CHAT_SUGGESTIONS = [
 
 function formatBubble(text) {
   return text
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")  // escape HTML first
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
     .replace(/\*(.+?)\*/g, "<em>$1</em>")
-    .replace(/^[-•]\s+/gm, "• ");
+    .replace(/^### (.+)$/gm, "<strong style='font-size:13px;display:block;margin-top:10px'>$1</strong>")
+    .replace(/^## (.+)$/gm, "<strong style='font-size:14px;display:block;margin-top:12px'>$1</strong>")
+    .replace(/^# (.+)$/gm, "<strong style='font-size:15px;display:block;margin-top:14px'>$1</strong>")
+    .replace(/^[-•*]\s+(.+)$/gm, "<div style='display:flex;gap:6px;margin:2px 0'><span>•</span><span>$1</span></div>")
+    .replace(/^\d+\.\s+(.+)$/gm, "<div style='display:flex;gap:6px;margin:2px 0'><span style='min-width:16px'>$&</span></div>")
+    .replace(/\n\n/g, "<div style='margin-top:8px'></div>")
+    .replace(/\n/g, "<br/>");
 }
 
 function ChatPanel({ profileData, results, docs, messages, setMessages }) {
@@ -1967,7 +2195,7 @@ function ChatPanel({ profileData, results, docs, messages, setMessages }) {
           model: "claude-haiku-4-5-20251001",
           max_tokens: 600,
           system: systemPrompt,
-          messages: newMessages.map(m => ({ role: m.role, content: m.content })),
+          messages: newMessages.slice(-10).map(m => ({ role: m.role, content: m.content })),
         })),
       });
       const data = await resp.json();
@@ -2623,6 +2851,8 @@ function VisaLensApp() {
   const [reqsCsvText,       setReqsCsvText]       = useState("");
   const [conflictData,      setConflictData]      = useState(null);
   const [preferredOfferIndex, setPreferredOfferIndex] = useState(0);
+  const [activeCaseId, setActiveCaseId] = useState(null);
+  const [counsellorName, setCounsellorName] = useState("");
   const [docTypes,      setDocTypes]      = useState({});
   const [subTypes,      setSubTypes]      = useState({});
   const [personTags,    setPersonTags]    = useState({});
@@ -2698,24 +2928,84 @@ function VisaLensApp() {
       } catch {}
     })();
   }, [results]);
-  useEffect(() => {
-    (async () => {
-      try { const r = await window.storage.get("visalens_v14"); if(r) { const parsed = JSON.parse(r.value); setCases(Array.isArray(parsed) ? parsed : []); } } catch {}
+ useEffect(() => {
+  (async () => {
+    const remoteCases = await loadCasesFromSupabase();
+    if (remoteCases.length > 0) {
+      setCases(remoteCases);
+    } else {
       try {
-        const r = await window.storage.get("visalens_v14_reqs");
-        if (r && r.value) {
-          const rows = parseCSV(r.value);
-          if (rows.length) { setCustomRequirements(csvToRequirements(rows)); setReqsCsvText(r.value); }
-        }
+        const r = await window.storage.get("visalens_v14");
+        if (r) { const parsed = JSON.parse(r.value); setCases(Array.isArray(parsed) ? parsed : []); }
       } catch {}
-      try {
-        const r = await window.storage.get("visalens_v14_dark");
-        if (r && r.value === "1") setDarkMode(true);
-      } catch {}
-    })();
-  }, []);
+    }
+    try {
+      const r = await window.storage.get("visalens_v14_reqs");
+      if (r && r.value) {
+        const rows = parseCSV(r.value);
+        if (rows.length) { setCustomRequirements(csvToRequirements(rows)); setReqsCsvText(r.value); }
+      }
+    } catch {}
+    try {
+      const r = await window.storage.get("visalens_v14_dark");
+      if (r && r.value === "1") setDarkMode(true);
+    } catch {}
+  })();
+}, []);
 
-  async function persist(u) { try { await window.storage.set("visalens_v14", JSON.stringify(u)); } catch {} }
+async function persist(u) { try { await window.storage.set("visalens_v14", JSON.stringify(u)); } catch {} }
+
+async function saveCaseToSupabase(profile, res, docList, notesText, prefIdx, counsellor) {
+  if (!ORG_ID) return null;
+  try {
+    const resolved = resolveOffer(profile, prefIdx);
+    const { data, error } = await supabase.from('cases').insert({
+      org_id: ORG_ID,
+      student_name: profile.fullName || 'Unknown',
+      profile_data: profile,
+      results: res,
+      doc_list: docList.map(d => ({ name: d.renamed || d.file?.name, type: d.type })),
+      notes: notesText || '',
+      preferred_offer_index: prefIdx || 0,
+      counsellor_name: counsellor || 'Unknown',
+      overall_score: res?.eligibility?.overallScore || 0,
+      target_country: resolved.country || profile.targetCountry || '',
+    }).select('id').single();
+    if (error) { console.error('Supabase save error:', error); return null; }
+    return data?.id || null;
+  } catch (e) { console.error('Supabase save error:', e); return null; }
+}
+
+async function loadCasesFromSupabase() {
+  if (!ORG_ID) return [];
+  try {
+    const { data, error } = await supabase
+      .from('cases')
+      .select('id, created_at, student_name, profile_data, results, doc_list, notes, preferred_offer_index, counsellor_name, overall_score, target_country')
+      .eq('org_id', ORG_ID)
+      .order('created_at', { ascending: false })
+      .limit(100);
+    if (error) { console.error('Supabase load error:', error); return []; }
+    return (data || []).map(r => ({
+      id: r.id,
+      savedAt: r.created_at,
+      profile: r.profile_data,
+      results: r.results,
+      notes: r.notes || '',
+      preferredOfferIndex: r.preferred_offer_index || 0,
+      counsellorName: r.counsellor_name || '',
+      overallScore: r.overall_score || 0,
+      targetCountry: r.target_country || '',
+      fromSupabase: true,
+    }));
+  } catch (e) { console.error('Supabase load error:', e); return []; }
+}
+
+async function deleteCaseFromSupabase(id) {
+  if (!ORG_ID) return;
+  try { await supabase.from('cases').delete().eq('id', id); }
+  catch (e) { console.error('Supabase delete error:', e); }
+}
 
   const mergedRequirements = customRequirements
     ? { ...UNIVERSITY_DATA, ...customRequirements }
@@ -2948,7 +3238,7 @@ ${notes ? `<div class="section"><div class="section-title">Counselor Notes</div>
 
   async function analyze() {
     if (!docs.length) return;
-    setLoading(true); setError(""); setResults(null); setProfileData({}); setNotes(""); setSavedMsg(""); setSearchResults(null); setConflictData(null);
+    setLoading(true); setError(""); setResults(null); setProfileData({}); setNotes(""); setSavedMsg(""); setActiveCaseId(null); setSearchResults(null); setConflictData(null);
     try {
       const conflictContent = await buildContent(docs,
         `You are a document identity checker for a student visa counselling system.
@@ -3035,7 +3325,7 @@ Rules:
       }
 
       const content = await buildContent(docs, `You are an expert student visa counselor assistant. Analyse all documents and return ONLY valid JSON — no markdown, no explanation, no extra text. Use "Not found" for missing string fields and 0 for missing scores.
-{"studentProfile":{"fullName":"","dob":"","nationality":"","passportNumber":"","passportExpiry":"","program":"","yearOfPassing":"","university":"","targetCountry":"","offerLetters":[{"status":"Full|Conditional","university":"","country":"","program":"","intakeSeason":"","conditions":""}],"financialBalance":"","financialHolder":"","academicResult":"","studyGap":"","ieltsScore":"","toeflScore":"","pteScore":"","otherEnglishTest":"","mediumOfInstruction":""},"rejections":[{"type":"visa|admission|deferment","country":"","university":"","program":"","date":"","reason":""}],"missingDocuments":[{"document":"","reason":""}],"eligibility":{"overallScore":0,"financialScore":0,"academicScore":0,"documentScore":0,"summary":"","notes":[]},"redFlags":[{"flag":"","severity":"high|medium|low","detail":""}]}
+{"studentProfile":{"fullName":"","dob":"","nationality":"","passportNumber":"","passportExpiry":"","cnicNumber":"","cnicExpiry":"","program":"","yearOfPassing":"","university":"","targetCountry":"","offerLetters":[{"status":"Full|Conditional","university":"","country":"","program":"","intakeSeason":"","conditions":""}],"financialBalance":"","financialHolder":"","academicResult":"","studyGap":"","ieltsScore":"","toeflScore":"","pteScore":"","otherEnglishTest":"","mediumOfInstruction":"","detectedDocs":[], "nameMismatches":[]},"rejections":[{"type":"visa|admission|deferment","country":"","university":"","program":"","date":"","reason":""}],"missingDocuments":[{"document":"","reason":""}],"eligibility":{"overallScore":0,"financialScore":0,"academicScore":0,"documentScore":0,"summary":"","notes":[]},"redFlags":[{"flag":"","severity":"high|medium|low","detail":""}]}
 
 DEPENDANT DOCUMENT HANDLING:
 Each document is pre-tagged with a "Person:" label in its file header:
@@ -3050,15 +3340,34 @@ Field extraction rules:
 - university: institution where that highest qualification was obtained.
 - targetCountry: destination country if determinable from context (e.g. student mentions a country without a formal offer). "Not found" if absent. This is a low-priority fallback field — if offerLetters has entries, those take precedence.
 - offerLetters: an ARRAY — one entry per offer/admission letter found. If NO offer letter is found, return an EMPTY ARRAY []. NEVER return "Not found" inside this array. Each entry: status = exactly "Full" or "Conditional"; university = exact institution name; country = country of the institution; program = specific programme the offer is for; intakeSeason = intake month/year or season (e.g. "September 2026", "Fall 2026") or "Not found"; conditions = any stated conditions (e.g. "IELTS 6.5 by August 2026", "subject to degree verification") or empty string "".
+- cnicNumber: the 13-digit CNIC number if a Pakistani CNIC card is present (format: XXXXX-XXXXXXX-X). "Not found" if absent.
+- cnicExpiry: the expiry date printed on the CNIC card. "Not found" if absent.
 - financialHolder: full name of account holder as printed on bank statement. "Not found" if absent.
 - financialBalance: balance/amount from financial document (e.g. "PKR 5,495,000"). "Not found" if absent.
 - academicResult: list EACH qualification on a SEPARATE line. Format: "[Degree] ([Year if known]): [Result/Grade]".
-- studyGap: ACTIVELY calculate gaps using ALL dates visible across qualification documents. Steps: (1) list all qualifications with their completion/passing year, (2) calculate the gap between each consecutive pair, (3) also calculate gap between most recent qualification and 2025. ONLY populate this field if a gap of MORE THAN 24 MONTHS (2 years) is found. Format: "X year(s) gap between [Qualification A] ([Year]) and [Qualification B / present] ([Year])". Include reason if stated in documents. If multiple gaps over 24 months exist, list each on a new line. "Not found" if no gap exceeds 24 months OR if no dates are visible.
+- studyGap: Follow these steps exactly:
+	(1) List every qualification with its completion year in chronological order.
+	(2) Estimate the START year of each qualification using these standard durations:
+    - Matric/O-Levels = 2 years
+    - Intermediate/FSc/FA/A-Levels = 2 years
+    - Bachelor's/BA/BS/BBA/BCS/BCom = 4 years (2 years if explicitly stated)
+    - Master's/MA/MS/MBA/MCS/MCom = 2 years
+    - PhD/doctorate = 4 years
+    Estimated start year = completion year − standard duration.
+	(3) For each consecutive pair of qualifications, calculate the gap between:
+    PREVIOUS qualification's completion year → NEXT qualification's estimated start year.
+    If this gap exceeds 24 months, flag it.
+	(4) Calculate the gap between the MOST RECENT qualification's completion year and 2026. This step is MANDATORY even if there is only one qualification. If this gap exceeds 24 months, flag it.
+	(5) Format each flagged gap as: "X year(s) gap between [Qualification A] ([Year]) and [Qualification B / present] ([Year])"  — use "present (2026)" for step 4.
+	(6) If NO gap exceeds 24 months, output "Not found".
+	IMPORTANT: Never assume a student was continuously studying just because two qualifications exist. Always verify using estimated start years.
 - missingDocuments: flag (a) missing required documents with reasons, (b) unclear/insufficient financial evidence, (c) unverified sponsor documentation, AND (d) any study gap over 24 months as a separate concern item (e.g. {"document":"Study Gap","reason":"3-year gap between BA (2018) and MA enrolment (2021) — no explanation provided"}).
 - ieltsScore, toeflScore, pteScore: numeric strings (e.g. "6.5", "95", "65"). "Not found" if absent.
-- otherEnglishTest: if ANY English language test or certification OTHER than IELTS, TOEFL, or PTE is found (e.g. OET, Duolingo, LanguageCert, Oxford Test of English, KITE, Password Skills, ITEP, Cambridge, TOEFL iBT Home Edition, etc.), capture it here as "[Test Name] — [Score/Grade]" (e.g. "OET — Grade B", "Duolingo — 115", "LanguageCert C1 — Merit"). "Not found" if absent.
+- otherEnglishTest: ONLY populate if an actual test RESULT or CERTIFICATE document is present proving the student HAS taken the test and received a score/grade. If more than one test RESULT or CERTIFICATE document is present, list each one in a SEPARATE line. Format: "[Test Name] — [Score/Grade]" (e.g. "OET — Grade B", "Duolingo — 115"). Do NOT populate from offer letter requirements, university conditions, visa checklists, or any document that merely lists accepted tests or requests the student to provide one. "Not found" if no actual result document exists.
+- nameMismatches: an ARRAY of name discrepancies found across identity and academic documents. Compare the full name as it appears on EACH document against the passport name. Even minor spelling differences count (e.g. "Maqbool" vs "Maqbol", "Muhammad" vs "Muhammed", missing middle name, different order of names). Format: [{"doc":"document type or filename","nameFound":"exact name as written","issue":"brief description of mismatch"}]. Return empty array [] if all names match or if only one identity document is present.
 - mediumOfInstruction: if any document explicitly states or implies that the student's degree/programme was taught in English (e.g. "medium of instruction: English", "all courses taught in English", "English-medium university"), capture a brief description (e.g. "English — stated on degree certificate", "English — confirmed on transcript"). "Not found" if absent.
 - rejections: all visa rejections, admission rejections, and deferments found. Empty array [] if none.
+- detectedDocs: an ARRAY of special documents actually found. Only include entries where physical evidence exists in the uploaded documents. Each entry: {"type":"","reference":"","amount":"","date":"","expiry":"","result":"","institution":"","notes":""}. Document types to detect: "IHS Receipt" (UK Immigration Health Surcharge — extract reference number, expiry, amount), "TB Certificate" (extract result: Clear/Not Clear, date, clinic, expiry), "University Fee Receipt" (extract amount, date, university name), "Application Fee Receipt" (extract amount, date, institution), "Health Insurance Certificate" (extract provider, coverage amount, validity dates), "Visa Fee Receipt" (extract amount, date), "Accommodation Confirmation" (extract provider, address, dates). Leave unused fields as empty string "". Return empty array [] if none found.
 Score 0-100. Keep summary and flag details concise. Return ONLY the JSON object.`, personTags);
       const raw    = await callAPI(content, 2500);
       const parsed = parseJSON(raw);
@@ -3094,7 +3403,7 @@ Score 0-100. Keep summary and flag details concise. Return ONLY the JSON object.
 
   function clearAll() {
     setDocs([]); setQualities({}); setResults(null); setProfileData({});
-    setNotes(""); setSavedMsg(""); setError(""); setSearchQuery("");
+    setNotes(""); setSavedMsg(""); setError(""); setActiveCaseId(null);  setSearchQuery("");
     setSearchResults(null); setRenameSuggestion(""); setConflictData(null);
     setPreferredOfferIndex(0);
     setDocTypes({}); setSubTypes({}); setPersonTags({}); setCustomLabels({}); setDocDepOpen({});
@@ -3119,12 +3428,39 @@ Score 0-100. Keep summary and flag details concise. Return ONLY the JSON object.
   }
 
   function handleSaveNotes() { setSavedMsg("Notes saved"); setTimeout(()=>setSavedMsg(""),2500); }
-  function handleSaveCase() {
-    if (!results) return;
-    const updated = [{id:Date.now().toString(),savedAt:new Date().toISOString(),results,profile:profileData,notes,preferredOfferIndex},...cases];
-    setCases(updated); persist(updated); setSavedMsg("Case saved to history"); setTimeout(()=>setSavedMsg(""),2500);
+  async function handleSaveCase() {
+  if (!results) return;
+  setSavedMsg("Saving…");
+
+  if (activeCaseId) {
+    // ── Updating an existing case ──
+    await updateCaseInSupabase(activeCaseId, notes, preferredOfferIndex);
+    setCases(prev => prev.map(c =>
+      c.id === activeCaseId ? { ...c, notes, preferredOfferIndex } : c
+    ));
+    setSavedMsg("Case updated ✓");
+  } else {
+    // ── Saving a brand new case ──
+    const caseId = await saveCaseToSupabase(profileData, results, docs, notes, preferredOfferIndex, counsellorName);
+    if (caseId) {
+      setActiveCaseId(caseId);
+      const remoteCases = await loadCasesFromSupabase();
+      setCases(remoteCases);        // ← this line was missing
+      setSavedMsg("Case saved ✓");
+      setCounsellorName("");
+    } else {
+      const newId = Date.now().toString();
+      const updated = [{ id: newId, savedAt: new Date().toISOString(), results, profile: profileData, notes, preferredOfferIndex }, ...cases];
+      setActiveCaseId(newId);
+      setCases(updated); persist(updated);
+      setSavedMsg("Saved locally (no org_id)");
+      setCounsellorName("");
+    }
   }
+  setTimeout(() => setSavedMsg(""), 2500);
+}
   function handleLoadCase(c) {
+    setActiveCaseId(c.id);
     setResults(c.results);
     const migratedProfile = migrateOfferLetter(c.profile||c.results.studentProfile||{});
     setProfileData(migratedProfile);
@@ -3133,8 +3469,33 @@ Score 0-100. Keep summary and flag details concise. Return ONLY the JSON object.
     setProfileDirty(false); setLiveElig(null);
     setTab("analyze");
   }
-  function handleDeleteCase(id) { const u=cases.filter(c=>c.id!==id); setCases(u); persist(u); }
-
+	async function handleDeleteCase(id) {
+	await deleteCaseFromSupabase(id);
+	const u = cases.filter(c => c.id !== id);
+	setCases(u); persist(u);
+	}
+	async function updateCaseInSupabase(id, notesText, prefIdx) {
+  if (!ORG_ID) return;
+  try {
+    const { error } = await supabase.from('cases')
+      .update({
+        notes: notesText || '',
+        preferred_offer_index: prefIdx || 0,
+      })
+      .eq('id', id);
+    if (error) console.error('Supabase update error:', error);
+  } catch (e) { console.error('Supabase update error:', e); }
+}
+async function renameCounsellorInSupabase(oldName, newName) {
+  if (!ORG_ID) return;
+  try {
+    const { error } = await supabase.from('cases')
+      .update({ counsellor_name: newName })
+      .eq('counsellor_name', oldName)
+      .eq('org_id', ORG_ID);
+    if (error) console.error('Rename error:', error);
+  } catch (e) { console.error('Rename error:', e); }
+}
   async function reAssess() {
     if (!results || !profileDirty) return;
     setReassessing(true);
@@ -3592,7 +3953,7 @@ Rules: scores 0-100. Summary max 2 sentences. Reflect any improvements from edit
                         <EligCard data={liveElig||results.eligibility} summary={results.eligibility.summary} profile={profileData} isLive={!!liveElig}/>
                         <MissingCard items={results.missingDocuments||[]}/>
                         <FlagsCard flags={results.redFlags||[]}/>
-                        <NotesCard notes={notes} setNotes={setNotes} onSave={handleSaveNotes} onSaveCase={handleSaveCase} savedMsg={savedMsg}/>
+						<NotesCard notes={notes} setNotes={setNotes} onSave={handleSaveNotes} onSaveCase={handleSaveCase} savedMsg={savedMsg} counsellorName={counsellorName} setCounsellorName={setCounsellorName} cases={cases}/>
                       </div>
                     </>
                   )}
@@ -3653,7 +4014,7 @@ Rules: scores 0-100. Summary max 2 sentences. Reflect any improvements from edit
                 <h1 className="pg-title">Student <em>Dashboard</em></h1>
                 <p className="pg-sub">Overview of all saved cases · click any row to open full analysis</p>
               </div>
-              <Dashboard cases={cases} onLoad={c=>{handleLoadCase(c);setTab("analyze");}}/>
+			<Dashboard cases={cases} onLoad={c=>{handleLoadCase(c);setTab("analyze");}} key={cases.length}/>
             </>
           )}
 
@@ -3662,9 +4023,18 @@ Rules: scores 0-100. Summary max 2 sentences. Reflect any improvements from edit
             <>
               <div className="pg-hdr">
                 <h1 className="pg-title">Case <em>History</em></h1>
-                <p className="pg-sub">{cases.length} saved case{cases.length!==1?"s":""} · stored locally</p>
+                <p className="pg-sub">{cases.length} saved case{cases.length!==1?"s":""} · stored in Visalens cloud</p>
               </div>
-              <CaseHistory cases={cases} onLoad={handleLoadCase} onDelete={handleDeleteCase}/>
+<CaseHistory
+  cases={cases}
+  onLoad={handleLoadCase}
+  onDelete={handleDeleteCase}
+  onRenameCounsellor={async (oldName, newName) => {
+    await renameCounsellorInSupabase(oldName, newName);
+    const remoteCases = await loadCasesFromSupabase();
+    setCases(remoteCases);
+  }}
+/>
             </>
           )}
 

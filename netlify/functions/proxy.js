@@ -1,14 +1,9 @@
 import { createClient } from '@supabase/supabase-js';
-import Anthropic from '@anthropic-ai/sdk';
 
 const supabase = createClient(
   process.env.VITE_SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
-
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-});
 
 const CORS_HEADERS = {
   'Content-Type': 'application/json',
@@ -69,7 +64,7 @@ export const handler = async (event) => {
       org = data;
     }
 
-    // ── 2. Anthropic API call ────────────────────────────────────────────
+    // ── 2. Anthropic API call (raw fetch — bypasses Netlify AI Gateway) ──
     const params = {
       model: model || 'claude-haiku-4-5-20251001',
       max_tokens: max_tokens || 1024,
@@ -77,7 +72,27 @@ export const handler = async (event) => {
     };
     if (system) params.system = system;
 
-    const msg = await anthropic.messages.create(params);
+    const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify(params),
+    });
+
+    if (!anthropicRes.ok) {
+      const errBody = await anthropicRes.text();
+      console.error('Anthropic API error:', anthropicRes.status, errBody);
+      return {
+        statusCode: anthropicRes.status,
+        headers: CORS_HEADERS,
+        body: JSON.stringify({ error: { message: errBody } }),
+      };
+    }
+
+    const msg = await anthropicRes.json();
 
     // ── 3. Deduct credit + log usage ─────────────────────────────────────
     if (org) {

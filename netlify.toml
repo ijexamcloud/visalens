@@ -6,12 +6,6 @@
 [build.environment]
   NODE_VERSION = "20"
 
-# Redirect API calls to Netlify functions
-[[redirects]]
-  from = "/.netlify/functions/*"
-  to = "/.netlify/functions/:splat"
-  status = 200
-
 # SPA fallback — all routes serve index.html
 [[redirects]]
   from = "/*"
