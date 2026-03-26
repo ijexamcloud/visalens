@@ -12,6 +12,18 @@ import {
 
 const PROXY_URL = "/.netlify/functions/proxy";
 
+const DARK_VARS = {
+  "--bg":   "#0F1E3C",
+  "--s1":   "#162444",
+  "--s2":   "#1C2E52",
+  "--s3":   "#223460",
+  "--bd":   "#2A3F6F",
+  "--bdem": "#3A5080",
+  "--t1":   "#E8EEF8",
+  "--t2":   "#94A3B8",
+  "--t3":   "#4A5D7E",
+};
+
 // ── ORG ID ───────────────────────────────────────────────────────────────────
 // Each deployed instance is tied to one org. Set VITE_ORG_ID in Netlify env vars
 // (Site Settings → Environment Variables). Leave blank for dev/passthrough mode.
