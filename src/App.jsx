@@ -16,10 +16,10 @@ import { createClient } from '@supabase/supabase-js';
 const PROXY_URL = "/.netlify/functions/proxy";
 
 /* ─── GOOGLE DRIVE CONFIG ──────────────────────────────────────────── */
-const GOOGLE_API_KEY    = "AIzaSyDTnBFilBLTPwl2PjFNFOsJmR_3y_8Y5MM";
-const GOOGLE_CLIENT_ID  = "1071277433322-ihk00hpbru01goj52b7isda9uuj7oepv.apps.googleusercontent.com";
+const GOOGLE_API_KEY    = import.meta.env.VITE_GOOGLE_API_KEY;
+const GOOGLE_CLIENT_ID  = import.meta.env.VITE_GOOGLE_CLIENT_ID;
 const DRIVE_SCOPES      = "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.readonly";
-const PICKER_APP_ID     = GOOGLE_CLIENT_ID.split("-")[0];
+const PICKER_APP_ID     = GOOGLE_CLIENT_ID ? GOOGLE_CLIENT_ID.split("-")[0] : "";
 const DRIVE_FOLDER_NAME = "VisaLens Reports";
 const DRIVE_TOKEN_KEY   = "visalens_gdrive_token";
 
