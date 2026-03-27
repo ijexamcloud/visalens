@@ -1,6 +1,7 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import './App.css';
 import JSZip from 'jszip';
+import mammoth from 'mammoth'; // ← ADD HERE, after JSZip
 import {
   AlertCircle, ArrowUpRight, BarChart3, Bell, BookOpen, Building2, Check, CheckCircle,
   ChevronDown, Clock, Copy, CreditCard, DollarSign, Download, Edit3, Eye, EyeOff,
@@ -9,9 +10,179 @@ import {
   Moon, Pencil, Plus, Printer, RefreshCw, Save, Search, Send, ShieldCheck, Star, Sun,
   Target, Trash2, TriangleAlert, Upload, User, X, XCircle, ZoomIn, Dot
 } from 'lucide-react';
- 
- import { createClient } from '@supabase/supabase-js';
+
+import { createClient } from '@supabase/supabase-js';
+
 const PROXY_URL = "/.netlify/functions/proxy";
+
+/* ─── GOOGLE DRIVE CONFIG ──────────────────────────────────────────── */
+const GOOGLE_API_KEY    = "AIzaSyDTnBFilBLTPwl2PjFNFOsJmR_3y_8Y5MM";
+const GOOGLE_CLIENT_ID  = "1071277433322-ihk00hpbru01goj52b7isda9uuj7oepv.apps.googleusercontent.com";
+const DRIVE_SCOPES      = "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.readonly";
+const PICKER_APP_ID     = GOOGLE_CLIENT_ID.split("-")[0];
+const DRIVE_FOLDER_NAME = "VisaLens Reports";
+const DRIVE_TOKEN_KEY   = "visalens_gdrive_token";
+
+const ALLOWED_EXTENSIONS = new Set(["pdf", "jpg", "jpeg", "png", "txt", "docx"]);
+const ALLOWED_MIME_TYPES = new Set([
+  "application/pdf",
+  "image/jpeg",
+  "image/png",
+  "image/jpg",
+  "text/plain",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+]);
+const UNSUPPORTED_BUT_COMMON = new Set(["odt", "doc", "xls", "xlsx", "ppt", "pptx"]);
+
+// ← ADD THIS FUNCTION HERE, outside the component
+async function extractTextFromDocx(file) {
+  const arrayBuffer = await file.arrayBuffer();
+  const result = await mammoth.extractRawText({ arrayBuffer });
+  return result.value;
+}
+
+// Load a Google API script tag once
+function loadGoogleScript(src) {
+  return new Promise((resolve, reject) => {
+    if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
+    const s = document.createElement("script");
+    s.src = src; s.async = true; s.defer = true;
+    s.onload = resolve; s.onerror = reject;
+    document.head.appendChild(s);
+  });
+}
+
+// Exchange token via gsi (Google Identity Services)
+let _gsiReady = false;
+let _tokenClient = null;
+async function initGSI() {
+  if (_gsiReady) return;
+  await loadGoogleScript("https://accounts.google.com/gsi/client");
+  _gsiReady = true;
+}
+async function getAccessToken(forcePrompt = false) {
+  await initGSI();
+  // Try stored token first (unless forcing prompt)
+  if (!forcePrompt) {
+    try {
+      const stored = sessionStorage.getItem(DRIVE_TOKEN_KEY);
+      if (stored) { const t = JSON.parse(stored); if (t.expires_at > Date.now() + 60000) return t.access_token; }
+    } catch {}
+  }
+  return new Promise((resolve, reject) => {
+    _tokenClient = window.google.accounts.oauth2.initTokenClient({
+      client_id: GOOGLE_CLIENT_ID,
+      scope: DRIVE_SCOPES,
+      callback: (resp) => {
+        if (resp.error) { reject(new Error(resp.error)); return; }
+        const token = {
+          access_token: resp.access_token,
+          expires_at: Date.now() + (resp.expires_in || 3600) * 1000,
+        };
+        try { sessionStorage.setItem(DRIVE_TOKEN_KEY, JSON.stringify(token)); } catch {}
+        resolve(resp.access_token);
+      },
+    });
+    _tokenClient.requestAccessToken({ prompt: forcePrompt ? "consent" : "" });
+  });
+}
+function clearDriveToken() {
+  try { sessionStorage.removeItem(DRIVE_TOKEN_KEY); } catch {}
+  if (window.google?.accounts?.oauth2) {
+    try { window.google.accounts.oauth2.revoke(sessionStorage.getItem(DRIVE_TOKEN_KEY)); } catch {}
+  }
+}
+function hasDriveToken() {
+  try {
+    const stored = sessionStorage.getItem(DRIVE_TOKEN_KEY);
+    if (!stored) return false;
+    const t = JSON.parse(stored);
+    return t.expires_at > Date.now() + 60000;
+  } catch { return false; }
+}
+
+// ── Drive Picker ────────────────────────────────────────────────────
+async function openDrivePicker(onFilePicked) {
+  await loadGoogleScript("https://apis.google.com/js/api.js");
+  await new Promise(res => window.gapi.load("picker", res));
+  const token = await getAccessToken();
+
+  const docsView = new window.google.picker.DocsView()
+    .setIncludeFolders(true)        // ← shows folders for navigation
+	.setSelectFolderEnabled(false)  // ← but prevents selecting a folder itself
+    .setMimeTypes("application/pdf,image/jpeg,image/png,image/jpg,text/plain");
+
+  const picker = new window.google.picker.PickerBuilder()
+    .setAppId(PICKER_APP_ID)
+    .setOAuthToken(token)
+    .setDeveloperKey(GOOGLE_API_KEY)
+    .addView(docsView)
+    .setTitle("Select documents to import")
+    .enableFeature(window.google.picker.Feature.MULTISELECT_ENABLED)
+    .setCallback(async (data) => {
+  if (data.action === window.google.picker.Action.PICKED) {
+    onFilePicked(data.docs);
+  } else if (data.action === window.google.picker.Action.CANCEL) {
+    onFilePicked([]);
+  }
+})
+    .build();
+  picker.setVisible(true);
+}
+
+// Download a Drive file as a Blob
+async function downloadDriveFile(fileId, mimeType, token) {
+  const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
+  const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (!resp.ok) {
+    const errText = await resp.text();
+    throw new Error(`Drive download failed: ${resp.status} — ${errText}`);
+  }
+  return await resp.blob();
+}
+
+// ── Drive Upload helpers ─────────────────────────────────────────────
+async function getDriveRootFolderId(token) {
+  // Find or create "VisaLens Reports" folder
+  const searchResp = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(`mimeType='application/vnd.google-apps.folder' and name='${DRIVE_FOLDER_NAME}' and trashed=false`)}&fields=files(id,name)`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+  const searchData = await searchResp.json();
+  if (searchData.files?.length > 0) return searchData.files[0].id;
+
+  // Create it
+  const createResp = await fetch("https://www.googleapis.com/drive/v3/files", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ name: DRIVE_FOLDER_NAME, mimeType: "application/vnd.google-apps.folder" }),
+  });
+  const created = await createResp.json();
+  return created.id;
+}
+
+async function createDriveSubfolder(token, parentId, folderName) {
+  const resp = await fetch("https://www.googleapis.com/drive/v3/files", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ name: folderName, mimeType: "application/vnd.google-apps.folder", parents: [parentId] }),
+  });
+  const data = await resp.json();
+  return data.id;
+}
+
+async function uploadFileToDrive(token, folderId, file, filename) {
+  const metadata = { name: filename, parents: [folderId] };
+  const form = new FormData();
+  form.append("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }));
+  form.append("file", file);
+  const resp = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  });
+  return await resp.json();
+}
 const supabase = createClient(
   import.meta.env.VITE_SUPABASE_URL,
   import.meta.env.VITE_SUPABASE_ANON_KEY
@@ -1198,7 +1369,8 @@ function UniversityChecker({ profile, requirementsData, compact, preferredOfferI
   function handleCountryChange(val) { setCountry(val); setUniName(""); setProgName(""); }
   function handleUniChange(val)     { setUniName(val); setProgName(""); }
   function handleProgChange(val)    { setProgName(progs.find(p => p.name === val) ? val : ""); }
-
+  function handleReset() { setCountry(""); setUniName(""); setProgName(""); }
+  
   // PTE Academic → IELTS band equivalent (standard conversion table)
   function pteToIelts(pte) {
     if (pte >= 79) return 9.0;
@@ -1270,6 +1442,12 @@ function UniversityChecker({ profile, requirementsData, compact, preferredOfferI
           <span className={`uni-src-badge ${isCustomCountry ? "custom" : "builtin"}`} style={{margin:0}}>
             {isCustomCountry ? <><FileSpreadsheet size={10}/>CSV</> : <><Info size={10}/>Built-in</>}
           </span>
+        )}
+        {(country||uniName||progName) && (
+          <button onClick={handleReset} title="Reset university checker"
+            style={{marginLeft:"auto",fontSize:11,fontWeight:600,color:"var(--t3)",background:"transparent",border:"1px solid var(--bd)",borderRadius:"var(--r1)",padding:"2px 8px",cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>
+            <RefreshCw size={10}/>Reset
+          </button>
         )}
       </div>
       <div className={compact ? "uni-sidebar-body" : "rc-body"}>
@@ -1781,7 +1959,7 @@ function FlagsCard({ flags }) {
     </div>
   );
 }
-function NotesCard({ notes, setNotes, onSave, onSaveCase, savedMsg, counsellorName, setCounsellorName, cases }) {
+function NotesCard({ notes, setNotes, onSave, onSaveCase, savedMsg, counsellorName, setCounsellorName, cases, activeCaseId }) {
   const [showSuggestions, setShowSuggestions] = useState(false);
   const existingNames = [...new Set((cases||[]).map(c => c.counsellorName).filter(Boolean))];
   const suggestions = counsellorName.trim()
@@ -1796,13 +1974,17 @@ function NotesCard({ notes, setNotes, onSave, onSaveCase, savedMsg, counsellorNa
           <div style={{fontSize:11,color:"var(--t3)",marginBottom:4,fontWeight:600,textTransform:"uppercase",letterSpacing:".05em"}}>Your Name</div>
           <input
             className="notes-input"
-            style={{width:"100%",fontSize:13}}
+            style={{width:"100%",fontSize:13, background: activeCaseId ? "var(--bg2)" : "", cursor: activeCaseId ? "not-allowed" : ""}}
             placeholder="e.g. Sara Ahmed"
             value={counsellorName}
-            onChange={e => { setCounsellorName(e.target.value); setShowSuggestions(true); }}
+            readOnly={!!activeCaseId}
+            onChange={e => { if (!activeCaseId) { setCounsellorName(e.target.value); setShowSuggestions(true); } }}
             onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
-            onFocus={() => setShowSuggestions(true)}
+            onFocus={() => { if (!activeCaseId) setShowSuggestions(true); }}
           />
+          {activeCaseId && (
+            <div style={{fontSize:11,color:"var(--t3)",marginTop:3}}>🔒 Name locked — case already saved</div>
+          )}
           {showSuggestions && suggestions.length > 0 && (
             <div style={{position:"absolute",top:"100%",left:0,right:0,background:"var(--bg)",border:"1px solid var(--bdr)",borderRadius:6,zIndex:100,boxShadow:"0 4px 12px rgba(0,0,0,0.1)"}}>
               {suggestions.map(name => (
@@ -1874,7 +2056,7 @@ function CaseHistory({ cases, onLoad, onDelete, onRenameCounsellor }) {
   });
   
   return (
-    <div>
+    <div style={{width:"100%"}}>
       <div className="rc" style={{marginBottom:16,padding:"14px 16px"}}>
         <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
           <div style={{flex:1,minWidth:180}}>
@@ -2861,7 +3043,11 @@ function VisaLensApp() {
   const [spouseName,    setSpouseName]    = useState("");
   const [profileDirty,      setProfileDirty]      = useState(false);
   const [reassessing,       setReassessing]       = useState(false);
-  const [liveElig,          setLiveElig]          = useState(null); 
+  const [liveElig,          setLiveElig]          = useState(null);
+  const [driveConnected,    setDriveConnected]    = useState(hasDriveToken);
+  const [driveImporting,    setDriveImporting]    = useState(false);
+  const [driveSaving,       setDriveSaving]       = useState(false);
+  const [driveSaveResult,   setDriveSaveResult]   = useState(null);
   const fileRef = useRef();
   const autoSaveTimer = useRef(null);
 
@@ -3075,18 +3261,201 @@ async function deleteCaseFromSupabase(id) {
     } catch { setQualities(p=>({...p,[doc.id]:{status:"ok"}})); }
   }
 
-  const addFiles = useCallback(files => {
-    const newDocs = Array.from(files).map(f=>({id:Math.random().toString(36).slice(2),file:f,type:guessType(f.name),renamed:null}));
-    setDocs(p=>[...p,...newDocs]);
-    setConflictData(null);
-    const newIds = newDocs.map(d => d.id);
-    setDocTypes(p => ({ ...p, ...Object.fromEntries(newDocs.map(d=>[d.id, guessType(d.file.name)])) }));
-    setPersonTags(p => ({ ...p, ...Object.fromEntries(newIds.map(id=>[id,"primary"])) }));
-    setSubTypes(p => ({ ...p, ...Object.fromEntries(newIds.map(id=>[id,""])) }));
-    setCustomLabels(p => ({ ...p, ...Object.fromEntries(newIds.map(id=>[id,""])) }));
-    setDocDepOpen(p => ({ ...p, ...Object.fromEntries(newIds.map(id=>[id,false])) }));
-    newDocs.forEach(d=>{ setQualities(p=>({...p,[d.id]:{status:"checking"}})); checkQuality(d); });
-  }, []);
+ async function handleDriveImport() {
+  setDriveImporting(true);
+  try {
+    await openDrivePicker(async (driveFiles) => {
+      if (!driveFiles?.length) { setDriveImporting(false); return; }
+      setDriveConnected(true);
+      const token = await getAccessToken();
+      const fetched = [];
+      for (const df of driveFiles) {
+        try {
+          // ── Type check BEFORE downloading ──
+          const ext = df.name.split(".").pop()?.toLowerCase() || "";
+          if (!ALLOWED_EXTENSIONS.has(ext)) {
+            setError(`🚫 ${df.name} is not supported. Only PDF, JPG, PNG and TXT files are allowed.`);
+            setTimeout(() => setError(""), 8000);
+            continue;
+          }
+
+          const blob = await downloadDriveFile(df.id, df.mimeType, token);
+          const mime = blob.type || (ext === "pdf" ? "application/pdf" : ext.startsWith("jp") ? "image/jpeg" : "image/png");
+
+          // ── MIME check AFTER downloading ──
+          if (!ALLOWED_MIME_TYPES.has(mime)) {
+            setError(`🚫 ${df.name} has an unsupported format and was skipped.`);
+            setTimeout(() => setError(""), 8000);
+            continue;
+          }
+
+          const typedBlob = new Blob([blob], { type: mime });
+          Object.defineProperty(typedBlob, "name", { value: df.name, writable: false });
+          Object.defineProperty(typedBlob, "lastModified", { value: Date.now(), writable: false });
+
+          // ── Size check ──
+          if (typedBlob.size > 4 * 1024 * 1024) {
+            setError(`🚫 ${df.name} exceeds 4MB and was skipped. Compress at ilovepdf.com first.`);
+            setTimeout(() => setError(""), 10000);
+            continue;
+          }
+
+          fetched.push(typedBlob);
+        } catch (e) {
+          console.error("Drive download error:", e);
+          setError(`⚠️ Could not download ${df.name} from Drive: ${e.message}`);
+          setTimeout(() => setError(""), 8000);
+        }
+      }
+      if (fetched.length) addFiles(fetched);
+      setDriveImporting(false);
+    });
+  } catch (e) {
+    setError("Google Drive connection failed. Please try again.");
+    setTimeout(() => setError(""), 8000);
+  } finally {
+    setDriveImporting(false);
+  }
+}
+
+  // ── Google Drive: save to Drive ──────────────────────────────────────
+  async function handleSaveToDrive() {
+    if (!docs.length && !results) return;
+    setDriveSaving(true);
+    setDriveSaveResult(null);
+    try {
+      const token      = await getAccessToken();
+      setDriveConnected(true);
+      const rootId     = await getDriveRootFolderId(token);
+      const studentName = profileData?.fullName || results?.studentProfile?.fullName || "Unknown Student";
+      const today      = new Date().toISOString().split("T")[0];
+      const folderName = `${studentName} — ${today}`;
+      const subId      = await createDriveSubfolder(token, rootId, folderName);
+
+      // Upload all docs
+      for (const doc of docs) {
+        const t      = docTypes[doc.id] || doc.type || "other";
+        const dt     = getDT(t);
+        const sub    = subTypes[doc.id] || "";
+        const label  = sub ? `${dt.label}-${sub}` : dt.label;
+        const ext    = doc.file.name.split(".").pop() || "pdf";
+        const fname  = `${label}.${ext}`;
+        await uploadFileToDrive(token, subId, doc.file, fname);
+      }
+
+      // Upload text report if analysis done
+      if (results) {
+        const p = profileData || results.studentProfile || {};
+        const lines = [
+          `VisaLens Report — ${studentName}`,
+          `Generated: ${new Date().toLocaleString()}`,
+          ``,
+          `=== PROFILE ===`,
+          `Name: ${p.fullName || "—"}`,
+          `Passport: ${p.passportNumber || "—"} (expires ${p.passportExpiry || "—"})`,
+          `IELTS: ${p.ieltsScore || "—"} | TOEFL: ${p.toeflScore || "—"} | PTE: ${p.pteScore || "—"}`,
+          `Financial Balance: ${p.financialBalance || "—"}`,
+          `Highest Qualification: ${p.program || "—"} — ${p.university || "—"} (${p.yearOfPassing || "—"})`,
+          ``,
+          `=== ELIGIBILITY ===`,
+          `Overall: ${results.eligibility?.overallScore || "—"}/100`,
+          `Financial: ${results.eligibility?.financialScore || "—"}/100`,
+          `Academic: ${results.eligibility?.academicScore || "—"}/100`,
+          `Document: ${results.eligibility?.documentScore || "—"}/100`,
+          ``,
+          `=== RED FLAGS (${results.redFlags?.length || 0}) ===`,
+          ...(results.redFlags || []).map(f => `[${f.severity?.toUpperCase() || "?"}] ${f.flag}: ${f.detail || ""}`),
+          ``,
+          `=== MISSING DOCUMENTS ===`,
+          ...(results.missingDocuments || []).map(m => `• ${m.document}: ${m.whyNeeded || ""}`),
+          ``,
+          `=== NOTES ===`,
+          notes || "(no notes)",
+        ].join("\n");
+        const reportBlob = new Blob([lines], { type: "text/plain" });
+		const reportName = `VisaLens_Report_${studentName.replace(/\s+/g, "_")}.txt`;
+		await uploadFileToDrive(token, subId, reportBlob, reportName);
+      }
+
+      // Get folder link
+      const folderResp = await fetch(
+        `https://www.googleapis.com/drive/v3/files/${subId}?fields=webViewLink`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      const folderData = await folderResp.json();
+      setDriveSaveResult({ link: folderData.webViewLink, folderName });
+    } catch (e) {
+      setError("Save to Drive failed: " + (e.message || "Unknown error"));
+      setTimeout(() => setError(""), 10000);
+    }
+    setDriveSaving(false);
+  }
+
+  function handleDisconnectDrive() {
+    clearDriveToken();
+    setDriveConnected(false);
+    setDriveSaveResult(null);
+  }
+  const addFiles = useCallback(async (files) => {
+  const fileArray = Array.from(files);
+  const processedFiles = [];
+
+  for (const f of fileArray) {
+    const ext = f.name.split(".").pop()?.toLowerCase() || "";
+
+    // ── Block unsupported common formats ──
+    if (UNSUPPORTED_BUT_COMMON.has(ext)) {
+      setError(`🚫 ${f.name}: ${ext.toUpperCase()} files are not supported. Please save as PDF and re-upload.`);
+      setTimeout(() => setError(""), 8000);
+      continue;
+    }
+
+    // ── Convert DOCX to TXT ──
+    if (ext === "docx") {
+      try {
+        const text = await extractTextFromDocx(f);
+        const txtBlob = new Blob([text], { type: "text/plain" });
+        Object.defineProperty(txtBlob, "name", { value: f.name.replace(/\.docx?$/, ".txt"), writable: false });
+        Object.defineProperty(txtBlob, "lastModified", { value: Date.now(), writable: false });
+        processedFiles.push(txtBlob);
+      } catch (e) {
+        setError(`⚠️ Could not read ${f.name}. Try saving as PDF first.`);
+        setTimeout(() => setError(""), 8000);
+      }
+      continue;
+    }
+
+    processedFiles.push(f);
+  }
+
+  // ── Size checks on processed files ──
+  const blockedFiles = processedFiles.filter(f => f.size > 4 * 1024 * 1024);
+  const warnFiles    = processedFiles.filter(f => f.size > 3 * 1024 * 1024 && f.size <= 4 * 1024 * 1024);
+  const allowedFiles = processedFiles.filter(f => f.size <= 4 * 1024 * 1024);
+
+  if (blockedFiles.length > 0) {
+    const names = blockedFiles.map(f => `${f.name} (${(f.size/1024/1024).toFixed(1)}MB)`).join(', ');
+    setError(`🚫 File too large — ${names} exceeds the 4MB limit. Please compress at ilovepdf.com before uploading.`);
+    setTimeout(() => setError(""), 10000);
+  }
+  if (warnFiles.length > 0) {
+    const names = warnFiles.map(f => `${f.name} (${(f.size/1024/1024).toFixed(1)}MB)`).join(', ');
+    setError(`⚠️ Large file: ${names} may be slow to analyse. Consider compressing at ilovepdf.com.`);
+    setTimeout(() => setError(""), 8000);
+  }
+  if (!allowedFiles.length) return;
+
+  const newDocs = allowedFiles.map(f => ({ id: Math.random().toString(36).slice(2), file: f, type: guessType(f.name), renamed: null }));
+  setDocs(p => [...p, ...newDocs]);
+  setConflictData(null);
+  const newIds = newDocs.map(d => d.id);
+  setDocTypes(p => ({ ...p, ...Object.fromEntries(newDocs.map(d => [d.id, guessType(d.file.name)])) }));
+  setPersonTags(p => ({ ...p, ...Object.fromEntries(newIds.map(id => [id, "primary"])) }));
+  setSubTypes(p => ({ ...p, ...Object.fromEntries(newIds.map(id => [id, ""])) }));
+  setCustomLabels(p => ({ ...p, ...Object.fromEntries(newIds.map(id => [id, ""])) }));
+  setDocDepOpen(p => ({ ...p, ...Object.fromEntries(newIds.map(id => [id, false])) }));
+  newDocs.forEach(d => { setQualities(p => ({ ...p, [d.id]: { status: "checking" } })); checkQuality(d); });
+}, []);
 
   function removeDocsByNames(fileNames) {
     const nameSet = new Set(fileNames.map(n => n.toLowerCase()));
@@ -3134,7 +3503,7 @@ async function deleteCaseFromSupabase(id) {
   @media print{body{padding:16px}button{display:none}}
 </style></head><body>
 <h1>VisaLens Student Report</h1>
-<div class="meta">Generated ${new Date().toLocaleString()} &nbsp;·&nbsp; VisaLens v15</div>
+<div class=\"meta\">Generated ${new Date().toLocaleString()}</div>
 
 <div class="section">
   <div class="section-title">Personal Information</div>
@@ -3211,6 +3580,59 @@ ${notes ? `<div class="section"><div class="section-title">Counselor Notes</div>
     const w = window.open("", "_blank");
     if (w) { w.document.write(html); w.document.close(); setTimeout(() => w.print(), 400); }
   }
+
+function exportCSV() {
+  if (!results || !profileData) return;
+  const p = profileData, e = results.eligibility;
+  const esc = v => `"${String(v||"").replace(/"/g,'""')}"`;
+  const offers = Array.isArray(p.offerLetters) ? p.offerLetters : [];
+  const preferredOffer = offers[preferredOfferIndex] || offers[0] || {};
+  const rows = [
+    ["Field", "Value"],
+    ["Full Name",           p.fullName],
+    ["Date of Birth",       p.dob],
+    ["Nationality",         p.nationality],
+    ["Passport No.",        p.passportNumber],
+    ["Passport Expiry",     p.passportExpiry],
+    ["CNIC No.",            p.cnicNumber],
+    ["Preferred University",preferredOffer.university],
+    ["Preferred Country",   preferredOffer.country],
+    ["Preferred Programme", preferredOffer.program],
+    ["Offer Status",        preferredOffer.status],
+    ["Intake",              preferredOffer.intakeSeason],
+    ["Conditions",          preferredOffer.conditions],
+    ["Highest Qualification",p.program],
+    ["Year of Passing",     p.yearOfPassing],
+    ["Academic University", p.university],
+    ["Academic Result",     p.academicResult],
+    ["Study Gap",           p.studyGap],
+    ["IELTS Score",         p.ieltsScore],
+    ["TOEFL Score",         p.toeflScore],
+    ["PTE Score",           p.pteScore],
+    ["Other English Test",  p.otherEnglishTest],
+    ["Medium of Instruction",p.mediumOfInstruction],
+    ["Financial Balance",   p.financialBalance],
+    ["Financial Holder",    p.financialHolder],
+    ["Overall Score",       e?.overallScore],
+    ["Financial Score",     e?.financialScore],
+    ["Academic Score",      e?.academicScore],
+    ["Document Score",      e?.documentScore],
+    ["Summary",             e?.summary],
+    ["Red Flags",           results.redFlags?.map(f=>`[${f.severity.toUpperCase()}] ${f.flag}: ${f.detail}`).join(" | ")],
+    ["Missing Documents",   results.missingDocuments?.map(d=>`${d.document}: ${d.reason}`).join(" | ")],
+    ["Counsellor Notes",    notes],
+    ["Counsellor Name",     counsellorName],
+    ["Export Date",         new Date().toLocaleString()],
+  ];
+  const csv = rows.map(r => r.map(esc).join(",")).join("\n");
+  const blob = new Blob([csv], {type:"text/csv"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `VisaLens_${(p.fullName||"Student").replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
   async function buildContent(docList, prompt, personTagsMap = {}) {
     const content = [];
@@ -3339,11 +3761,13 @@ Field extraction rules:
 - yearOfPassing: the year the highest qualification was completed/awarded (e.g. "2023"). "Not found" if absent.
 - university: institution where that highest qualification was obtained.
 - targetCountry: destination country if determinable from context (e.g. student mentions a country without a formal offer). "Not found" if absent. This is a low-priority fallback field — if offerLetters has entries, those take precedence.
-- offerLetters: an ARRAY — one entry per offer/admission letter found. If NO offer letter is found, return an EMPTY ARRAY []. NEVER return "Not found" inside this array. Each entry: status = exactly "Full" or "Conditional"; university = exact institution name; country = country of the institution; program = specific programme the offer is for; intakeSeason = intake month/year or season (e.g. "September 2026", "Fall 2026") or "Not found"; conditions = any stated conditions (e.g. "IELTS 6.5 by August 2026", "subject to degree verification") or empty string "".
-- cnicNumber: the 13-digit CNIC number if a Pakistani CNIC card is present (format: XXXXX-XXXXXXX-X). "Not found" if absent.
-- cnicExpiry: the expiry date printed on the CNIC card. "Not found" if absent.
+- offerLetters: an ARRAY — one entry per offer/admission letter found. If NO offer letter is found, return an EMPTY ARRAY []. NEVER return "Not found" inside this array. Each entry: status = exactly "Full", "Unconditional" or "Conditional"; university = exact institution name; country = country of the institution; program = specific programme the offer is for; intakeSeason = intake month/year or season (e.g. "September 2026", "Fall 2026") or "Not found"; conditions = any stated conditions (e.g. "IELTS 6.5 by August 2026", "subject to degree verification") or empty string "".
+- passportNumber: extract ONLY from a passport document. A Pakistani passport number is ALWAYS exactly 9 characters: 2 uppercase letters followed by 7 digits (e.g. "AB1234567"). It is NEVER a 13-digit hyphenated CNIC number, NEVER 8 digits, NEVER more than 9 characters. If the value you find does not match this exact pattern, set passportNumber to "Not found" and do NOT guess. If you find the passport number to be blurry or unreadable while meeting the 9 characters criteria set passportNumber to "Document Unreadable: Upload again", If the only number found is in CNIC format (XXXXX-XXXXXXX-X), set passportNumber to "Not found".
+- passportExpiry: extract ONLY from a passport document. NEVER use the expiry date printed on a CNIC card for this field.
+- cnicNumber: the 13-digit CNIC number if a Pakistani CNIC card is present (format: XXXXX-XXXXXXX-X). NEVER use this value for passportNumber. "Not found" if absent.
+- cnicExpiry: the expiry date printed on the CNIC card. NEVER use this value for passportExpiry. "Not found" if absent.
 - financialHolder: full name of account holder as printed on bank statement. "Not found" if absent.
-- financialBalance: balance/amount from financial document (e.g. "PKR 5,495,000"). "Not found" if absent.
+- financialBalance: extract the MOST RECENT closing/available balance from the student's or confirmed sponsor's primary bank statement. If multiple statements exist, list each on a separate line: "[Account Holder] — [Balance] ([Bank Name])". Never sum balances across accounts. "Not found" if absent.
 - academicResult: list EACH qualification on a SEPARATE line. Format: "[Degree] ([Year if known]): [Result/Grade]".
 - studyGap: Follow these steps exactly:
 	(1) List every qualification with its completion year in chronological order.
@@ -3357,7 +3781,7 @@ Field extraction rules:
 	(3) For each consecutive pair of qualifications, calculate the gap between:
     PREVIOUS qualification's completion year → NEXT qualification's estimated start year.
     If this gap exceeds 24 months, flag it.
-	(4) Calculate the gap between the MOST RECENT qualification's completion year and 2026. This step is MANDATORY even if there is only one qualification. If this gap exceeds 24 months, flag it.
+	(4) Calculate the gap between the MOST RECENT qualification's completion year and the current year. This step is MANDATORY even if there is only one qualification. If this gap exceeds 24 months, flag it.
 	(5) Format each flagged gap as: "X year(s) gap between [Qualification A] ([Year]) and [Qualification B / present] ([Year])"  — use "present (2026)" for step 4.
 	(6) If NO gap exceeds 24 months, output "Not found".
 	IMPORTANT: Never assume a student was continuously studying just because two qualifications exist. Always verify using estimated start years.
@@ -3368,7 +3792,13 @@ Field extraction rules:
 - mediumOfInstruction: if any document explicitly states or implies that the student's degree/programme was taught in English (e.g. "medium of instruction: English", "all courses taught in English", "English-medium university"), capture a brief description (e.g. "English — stated on degree certificate", "English — confirmed on transcript"). "Not found" if absent.
 - rejections: all visa rejections, admission rejections, and deferments found. Empty array [] if none.
 - detectedDocs: an ARRAY of special documents actually found. Only include entries where physical evidence exists in the uploaded documents. Each entry: {"type":"","reference":"","amount":"","date":"","expiry":"","result":"","institution":"","notes":""}. Document types to detect: "IHS Receipt" (UK Immigration Health Surcharge — extract reference number, expiry, amount), "TB Certificate" (extract result: Clear/Not Clear, date, clinic, expiry), "University Fee Receipt" (extract amount, date, university name), "Application Fee Receipt" (extract amount, date, institution), "Health Insurance Certificate" (extract provider, coverage amount, validity dates), "Visa Fee Receipt" (extract amount, date), "Accommodation Confirmation" (extract provider, address, dates). Leave unused fields as empty string "". Return empty array [] if none found.
-Score 0-100. Keep summary and flag details concise. Return ONLY the JSON object.`, personTags);
+- redFlags: flag the following as high severity: expired passport, expired visa, previous visa refusal, insufficient funds, forged/suspicious documents. Flag as medium: study gap over 2 years, name mismatch, conditional offer with unmet conditions, expiring passport within 6 months, police clearance certificate older than 6 months from its issue date (if issue date is present) or if no issue date is visible flag as low with a note to verify. Flag as low: missing minor supporting documents, unclear financial source. Only flag things with clear evidence in the documents. Prioritise the above categories. You may flag additional issues only if there is clear documentary evidence and it would materially affect visa approval.
+Scoring guidelines (0-100):
+- overallScore: weighted average of all three sub-scores (financial 40%, academic 30%, document 30%)
+- financialScore: 100 = sufficient funds clearly evidenced; 70 = funds present but unclear source; 40 = insufficient or unverified; 0 = no financial docs
+- academicScore: 100 = strong academics, no gaps, meets requirements; 70 = average with minor gaps; 40 = weak grades or significant gap; 0 = no academic docs
+- documentScore: 100 = all required docs present and valid; 70 = minor docs missing; 40 = key docs missing; 0 = critical docs absent
+Keep summary and flag details concise. Return ONLY the JSON object.`, personTags);
       const raw    = await callAPI(content, 2500);
       const parsed = parseJSON(raw);
       if (!parsed) throw new Error("Could not parse analysis response — the AI returned an unexpected format. Please try again.");
@@ -3460,12 +3890,26 @@ Score 0-100. Keep summary and flag details concise. Return ONLY the JSON object.
   setTimeout(() => setSavedMsg(""), 2500);
 }
   function handleLoadCase(c) {
+    if (docs.length > 0 || results) {
+      const confirmed = window.confirm(
+        "Loading this case will clear your current session. Continue?"
+      );
+      if (!confirmed) return;
+    }
+    setDocs([]);
+    setQualities({});
+    setDocTypes({});
+    setSubTypes({});
+    setPersonTags({});
+    setCustomLabels({});
+    setDocDepOpen({});
     setActiveCaseId(c.id);
     setResults(c.results);
     const migratedProfile = migrateOfferLetter(c.profile||c.results.studentProfile||{});
     setProfileData(migratedProfile);
     setPreferredOfferIndex(c.preferredOfferIndex || 0);
     setNotes(c.notes||"");
+	setCounsellorName(c.counsellorName||"");
     setProfileDirty(false); setLiveElig(null);
     setTab("analyze");
   }
@@ -3643,7 +4087,33 @@ Rules: scores 0-100. Summary max 2 sentences. Reflect any improvements from edit
                     </div>
                     <input ref={fileRef} type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.txt" style={{display:"none"}} onChange={e=>{addFiles(e.target.files);e.target.value="";}}/>
 
-                    {docs.length>0&&(
+                    {/* ── Google Drive Import ── */}
+                    <div style={{padding:"0 14px 10px",display:"flex",flexDirection:"column",gap:6}}>
+                      <button
+                        className="btn-s"
+                        style={{width:"100%",justifyContent:"center",gap:8,height:36,borderColor:"rgba(66,133,244,.4)",color:"#4285F4",background:"rgba(66,133,244,.06)"}}
+                        onClick={handleDriveImport}
+                        disabled={driveImporting}
+                        title="Import files directly from Google Drive"
+                      >
+                        {driveImporting
+                          ? <Loader2 size={14} style={{animation:"spin .7s linear infinite"}}/>
+                          : <svg width="14" height="14" viewBox="0 0 87.3 78" xmlns="http://www.w3.org/2000/svg"><path d="m6.6 66.85 3.85 6.65c.8 1.4 1.95 2.5 3.3 3.3l13.75-23.8h-27.5c0 1.55.4 3.1 1.2 4.5z" fill="#0066da"/><path d="m43.65 25-13.75-23.8c-1.35.8-2.5 1.9-3.3 3.3l-25.4 44a9.06 9.06 0 0 0 -1.2 4.5h27.5z" fill="#00ac47"/><path d="m73.55 76.8c1.35-.8 2.5-1.9 3.3-3.3l1.6-2.75 7.65-13.25c.8-1.4 1.2-2.95 1.2-4.5h-27.502l5.852 11.5z" fill="#ea4335"/><path d="m43.65 25 13.75-23.8c-1.35-.8-2.9-1.2-4.5-1.2h-18.5c-1.6 0-3.15.45-4.5 1.2z" fill="#00832d"/><path d="m59.8 53h-32.3l-13.75 23.8c1.35.8 2.9 1.2 4.5 1.2h50.8c1.6 0 3.15-.45 4.5-1.2z" fill="#2684fc"/><path d="m73.4 26.5-12.7-22c-.8-1.4-1.95-2.5-3.3-3.3l-13.75 23.8 16.15 28h27.45c0-1.55-.4-3.1-1.2-4.5z" fill="#ffba00"/></svg>
+                        }
+                        {driveImporting ? "Connecting to Drive…" : "Import from Google Drive"}
+                      </button>
+                      {driveConnected && (
+                        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"4px 2px"}}>
+                          <span style={{fontSize:10,fontFamily:"var(--fm)",color:"var(--ok)",display:"flex",alignItems:"center",gap:4}}>
+                            <Check size={10}/>Drive connected
+                          </span>
+                          <button
+                            style={{fontSize:10,fontFamily:"var(--fm)",color:"var(--t3)",background:"transparent",border:"none",cursor:"pointer",textDecoration:"underline",padding:0}}
+                            onClick={handleDisconnectDrive}
+                          >Disconnect</button>
+                        </div>
+                      )}
+                    </div>
                       <>
                         {renameSuggestion&&(
                           <div className="rename-row">
@@ -3738,11 +4208,11 @@ Rules: scores 0-100. Summary max 2 sentences. Reflect any improvements from edit
                           })}
                         </div>
                       </>
-                    )}
+                    
 
                     {error&&<div className="err-banner"><AlertCircle size={14} style={{flexShrink:0,marginTop:1}}/><span>{error}</span></div>}
                     <div className="btn-wrap" style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-                      <button className="btn-p" style={{flex:1}} disabled={!docs.length||loading} onClick={analyze}>
+						<button className="btn-p" style={{flex:1}} disabled={!docs.length||loading||docs.some(d=>d.file.size>4*1024*1024)} onClick={analyze}>
                         {loading?<><Loader2 size={16} style={{animation:"spin .7s linear infinite"}}/>Checking documents…</>:<><ShieldCheck size={16}/>Analyse {docs.length>0?`${docs.length} `:""}Document{docs.length!==1?"s":""}</>}
                       </button>
                       {(docs.length>0||results)&&(
@@ -3755,6 +4225,35 @@ Rules: scores 0-100. Summary max 2 sentences. Reflect any improvements from edit
                       <button className="btn-download-folder" onClick={()=>setShowZip(true)}>
                         <Download size={13}/>Download Organised Folder
                       </button>
+                    )}
+
+                    {/* ── Save to Drive ── */}
+                    {(docs.length > 0 || results) && (
+                      <div style={{padding:"0 14px 10px",display:"flex",flexDirection:"column",gap:6}}>
+                        <button
+                          className="btn-download-folder"
+                          style={{borderColor:"rgba(66,133,244,.4)",color:"#4285F4",background:"rgba(66,133,244,.05)"}}
+                          onClick={handleSaveToDrive}
+                          disabled={driveSaving}
+                          title="Save all documents + AI report to Google Drive"
+                        >
+                          {driveSaving
+                            ? <><Loader2 size={13} style={{animation:"spin .7s linear infinite"}}/>Saving to Drive…</>
+                            : <><svg width="13" height="13" viewBox="0 0 87.3 78" xmlns="http://www.w3.org/2000/svg"><path d="m6.6 66.85 3.85 6.65c.8 1.4 1.95 2.5 3.3 3.3l13.75-23.8h-27.5c0 1.55.4 3.1 1.2 4.5z" fill="#0066da"/><path d="m43.65 25-13.75-23.8c-1.35.8-2.5 1.9-3.3 3.3l-25.4 44a9.06 9.06 0 0 0 -1.2 4.5h27.5z" fill="#00ac47"/><path d="m73.55 76.8c1.35-.8 2.5-1.9 3.3-3.3l1.6-2.75 7.65-13.25c.8-1.4 1.2-2.95 1.2-4.5h-27.502l5.852 11.5z" fill="#ea4335"/><path d="m43.65 25 13.75-23.8c-1.35-.8-2.9-1.2-4.5-1.2h-18.5c-1.6 0-3.15.45-4.5 1.2z" fill="#00832d"/><path d="m59.8 53h-32.3l-13.75 23.8c1.35.8 2.9 1.2 4.5 1.2h50.8c1.6 0 3.15-.45 4.5-1.2z" fill="#2684fc"/><path d="m73.4 26.5-12.7-22c-.8-1.4-1.95-2.5-3.3-3.3l-13.75 23.8 16.15 28h27.45c0-1.55-.4-3.1-1.2-4.5z" fill="#ffba00"/></svg>Save to Google Drive</>
+                          }
+                        </button>
+                        {driveSaveResult && (
+                          <div style={{display:"flex",alignItems:"flex-start",gap:8,padding:"8px 10px",background:"var(--okg)",border:"1px solid rgba(5,150,105,.2)",borderRadius:"var(--r1)",fontSize:12,fontFamily:"var(--fm)"}}>
+                            <CheckCircle size={13} color="var(--ok)" style={{flexShrink:0,marginTop:1}}/>
+                            <div>
+                              <div style={{fontWeight:700,color:"var(--ok)",marginBottom:3}}>Saved to Drive ✓</div>
+                              <div style={{color:"var(--t2)",marginBottom:4,wordBreak:"break-word"}}>{driveSaveResult.folderName}</div>
+                              <a href={driveSaveResult.link} target="_blank" rel="noopener noreferrer"
+                                style={{color:"var(--p)",textDecoration:"underline",fontSize:11}}>Open folder in Drive →</a>
+                            </div>
+                          </div>
+                        )}
+                      </div>
                     )}
 
                     {docs.length>0&&(
@@ -3933,7 +4432,8 @@ Rules: scores 0-100. Summary max 2 sentences. Reflect any improvements from edit
                       <div className="toolbar">
                         <button className="btn-s" onClick={()=>setShowReport(true)}><Send size={13}/>Share Report</button>
                         <button className="btn-s" onClick={exportPDF}><Printer size={13}/>Export PDF</button>
-                        {profileDirty&&(
+                        <button className="btn-s" onClick={exportCSV}><FileSpreadsheet size={13}/>Export CSV</button>
+						{profileDirty&&(
                           <button className="btn-reassess" onClick={reAssess} disabled={reassessing}>
                             {reassessing
                               ? <><Loader2 size={13} style={{animation:"spin .7s linear infinite"}}/>Re-assessing…</>
@@ -3953,7 +4453,7 @@ Rules: scores 0-100. Summary max 2 sentences. Reflect any improvements from edit
                         <EligCard data={liveElig||results.eligibility} summary={results.eligibility.summary} profile={profileData} isLive={!!liveElig}/>
                         <MissingCard items={results.missingDocuments||[]}/>
                         <FlagsCard flags={results.redFlags||[]}/>
-						<NotesCard notes={notes} setNotes={setNotes} onSave={handleSaveNotes} onSaveCase={handleSaveCase} savedMsg={savedMsg} counsellorName={counsellorName} setCounsellorName={setCounsellorName} cases={cases}/>
+						<NotesCard notes={notes} setNotes={setNotes} onSave={handleSaveNotes} onSaveCase={handleSaveCase} savedMsg={savedMsg} counsellorName={counsellorName} setCounsellorName={setCounsellorName} cases={cases} activeCaseId={activeCaseId}/>
                       </div>
                     </>
                   )}
@@ -4039,6 +4539,18 @@ Rules: scores 0-100. Summary max 2 sentences. Reflect any improvements from edit
           )}
 
         </main>
+		
+		{/* ── FOOTER ── */}
+        <footer className="app-footer">
+          <span>Powered by</span>
+          <a href="https://designlama.ai" target="_blank" rel="noopener noreferrer" className="footer-brand">
+            <svg width="16" height="16" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" style={{display:'inline',verticalAlign:'middle',marginRight:4}}>
+              <rect width="32" height="32" rx="8" fill="var(--p)"/>
+              <text x="7" y="22" fontSize="18" fill="white" fontFamily="serif" fontWeight="bold">λ</text>
+            </svg>
+            Designlama<span className="footer-brand-ai">-ai</span>
+          </a>
+        </footer>
       </div>
     </>
   );
