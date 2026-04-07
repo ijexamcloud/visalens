@@ -161,8 +161,12 @@ async function updateLeadStatus(id, newStatus) {
   if (!s?.org_id) return false;
   try {
     const { error } = await supabase.from('cases')
-      .update({ lead_status: newStatus, updated_at: new Date().toISOString() })
-      .eq('id',id).eq('org_id',s.org_id);
+      .update({
+        lead_status: newStatus,
+        updated_at: new Date().toISOString(),
+        status_updated_at: new Date().toISOString(), // <-- This line saves it to the DB
+      })
+      .eq('id', id).eq('org_id', s.org_id);
     return !error;
   } catch { return false; }
 }
@@ -172,7 +176,11 @@ async function bulkUpdateStatus(ids, newStatus) {
   if (!s?.org_id) return false;
   try {
     const { error } = await supabase.from('cases')
-      .update({ lead_status: newStatus, updated_at: new Date().toISOString() })
+      .update({
+        lead_status: newStatus,
+        updated_at: new Date().toISOString(),
+        status_updated_at: new Date().toISOString(), // <-- This line saves it to the DB
+      })
       .in('id', ids).eq('org_id', s.org_id);
     return !error;
   } catch { return false; }
