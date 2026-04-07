@@ -667,6 +667,13 @@ function QuickPeekDrawer({ student, onClose, onOpenFull, onStatusChange, onNoteU
   const [nba,        setNba]        = useState(null);   
   const [nbaLoading, setNbaLoading] = useState(false);
   const logRef = useRef(null);
+  // Payment Popover State
+  const [payOpen, setPayOpen] = useState(false);
+  const [payType, setPayType] = useState('Application Fee');
+  const [payOther, setPayOther] = useState('');
+  const [payAmount, setPayAmount] = useState('');
+  const [paySaving, setPaySaving] = useState(false);
+  const [localPaymentStatus, setLocalPaymentStatus] = useState(student?.paymentStatus || 'Unpaid');
 
   useEffect(()=>{
     const h = e=>{ if(e.key==='Escape') onClose(); };
@@ -679,6 +686,12 @@ function QuickPeekDrawer({ student, onClose, onOpenFull, onStatusChange, onNoteU
     setContact({ phone: '', email: '' });
     setLocalNotes(student.notes || '');
     setLogText('');
+    setPayOpen(false);
+    setPayOther('');
+    setPayAmount('');
+    setPayType('Application Fee');
+    setPaySaving(false);
+    setLocalPaymentStatus(student.paymentStatus || 'Unpaid');
     fetchContactDetails(student.id).then(setContact);
   },[student?.id]);
 
@@ -724,6 +737,43 @@ function QuickPeekDrawer({ student, onClose, onOpenFull, onStatusChange, onNoteU
     }
   }
 
+  async function handleSavePayment() {
+    const actualType = payType === 'Other' ? payOther.trim() : payType;
+    if (!actualType || !payAmount.trim()) return;
+
+    const s = getOrgSession();
+    const ts = new Date().toISOString();
+    setPaySaving(true);
+
+    // Persist payment status to DB
+    if (s?.org_id) {
+      try {
+        const { error } = await supabase.from('cases')
+          .update({ payment_status: 'Paid', updated_at: ts })
+          .eq('id', student.id).eq('org_id', s.org_id);
+        if (error) console.error('[StudentDashboard] payment_status update error:', error);
+      } catch (e) {
+        console.error('[StudentDashboard] payment_status update error:', e);
+      }
+    }
+
+    // Also log to activity ledger
+    const logStr = `[System] Payment recorded: ${actualType} (${payAmount.trim()})`;
+    const updatedNotes = await appendNoteEntry(student.id, localNotes, logStr);
+    if (updatedNotes !== null) {
+      setLocalNotes(updatedNotes);
+      onNoteUpdate && onNoteUpdate(student.id, updatedNotes);
+    }
+
+    // Optimistic UI update for the badge in this drawer
+    setLocalPaymentStatus('Paid');
+
+    setPaySaving(false);
+    setPayOpen(false);
+    setPayOther('');
+    setPayAmount('');
+  }
+
   const MILESTONE_COLORS = { expiry:'#F59E0B', intake:'#8B5CF6', interview:'#F97316', offer_letter:'#22C55E', alert:'#EF4444' };
   const msColor = milestone ? (MILESTONE_COLORS[milestone.kind] || '#1D6BE8') : null;
   const msDays  = milestone ? Math.ceil((milestone.date - new Date()) / 86400000) : null;
@@ -745,19 +795,86 @@ function QuickPeekDrawer({ student, onClose, onOpenFull, onStatusChange, onNoteU
   </span>
 )}
             </div>
-            {/* Payment + referral badges */}
-            <div style={{ display:'flex', alignItems:'center', gap:6, flexWrap:'wrap', marginTop: 6 }}>
-              <span style={{
-                fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 6, fontFamily: 'var(--fu)',
-                background: student.paymentStatus === 'Paid' ? 'rgba(5,150,105,.1)' : 'rgba(255,216,217,.5)',
-                color: student.paymentStatus === 'Paid' ? '#059669' : '#FC471C',
-                border: `1px solid ${student.paymentStatus === 'Paid' ? 'rgba(5,150,105,.2)' : 'rgba(252,71,28,.2)'}`
-              }}>
-                {student.paymentStatus === 'Paid' ? '✓ Deposit Paid' : 'Fees Unpaid'}
-              </span>
-              <span style={{ fontSize: 10, color: 'var(--t3)', fontFamily: 'var(--fu)', display: 'flex', alignItems: 'center', gap: 4 }}>
-                <Users size={10}/> Source: {student.referralSource || '—'}
-              </span>
+            {/* THE INTERACTIVE PAYMENT BADGE */}
+            <div style={{ position: 'relative', marginTop: 8 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <button
+                  onClick={() => setPayOpen(!payOpen)}
+                  style={{
+                    fontSize: 10, fontWeight: 700, padding: '4px 10px', borderRadius: 6, fontFamily: 'var(--fu)',
+                    background: localPaymentStatus === 'Paid' ? 'rgba(5,150,105,.1)' : 'rgba(255,216,217,.5)',
+                    color: localPaymentStatus === 'Paid' ? '#059669' : '#FC471C',
+                    border: `1px solid ${localPaymentStatus === 'Paid' ? 'rgba(5,150,105,.2)' : 'rgba(252,71,28,.2)'}`,
+                    cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5, transition: 'all var(--fast)'
+                  }}
+                >
+                  {localPaymentStatus === 'Paid' ? '✓ Deposit Paid' : 'Fees Unpaid'}
+                  <ChevronDown size={11} style={{ transform: payOpen ? 'rotate(180deg)' : 'none', transition: 'transform .2s' }}/>
+                </button>
+
+                <span style={{ fontSize: 10, color: 'var(--t3)', fontFamily: 'var(--fu)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <Users size={10}/> Source: {student.referralSource || '—'}
+                </span>
+              </div>
+
+              {/* THE CONDITIONAL PAYMENT POPOVER */}
+              {payOpen && (
+                <div style={{
+                  position: 'absolute', top: '100%', left: 0, marginTop: 8, zIndex: 400,
+                  background: 'var(--s1)', border: '1px solid var(--bd)', borderRadius: 12,
+                  boxShadow: 'var(--sh3)', width: 260, padding: 16, animation: 'sdb-fade-in .15s ease'
+                }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--t1)', marginBottom: 12, fontFamily: 'var(--fu)' }}>
+                    Record New Payment
+                  </div>
+
+                  <select
+                    value={payType}
+                    onChange={e => setPayType(e.target.value)}
+                    style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid var(--bd)', marginBottom: payType === 'Other' ? 8 : 12, fontSize: 'var(--text-xs)', fontFamily: 'var(--fu)', background: 'var(--s2)', color: 'var(--t1)' }}
+                  >
+                    <option value="Application Fee">Application Fee</option>
+                    <option value="Initial Deposit / CAS Fee">Initial Deposit / CAS Fee</option>
+                    <option value="Semester 1 Fee">Semester 1 Fee</option>
+                    <option value="Full Annual Fee">Full Annual Fee</option>
+                    <option value="IHS Fee">IHS Fee</option>
+                    <option value="Visa / Embassy Fee">Visa / Embassy Fee</option>
+                    <option value="Other">Other (Specify...)</option>
+                  </select>
+
+                  {payType === 'Other' && (
+                    <input
+                      autoFocus
+                      placeholder="e.g. Courier charges"
+                      value={payOther}
+                      onChange={e => setPayOther(e.target.value)}
+                      style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid var(--bd)', marginBottom: 12, fontSize: 'var(--text-xs)', fontFamily: 'var(--fu)', background: 'var(--s1)' }}
+                    />
+                  )}
+
+                  <input
+                    placeholder="Amount (e.g. £2,000)"
+                    value={payAmount}
+                    onChange={e => setPayAmount(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') handleSavePayment(); }}
+                    style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid var(--bd)', marginBottom: 14, fontSize: 'var(--text-xs)', fontFamily: 'var(--fu)', background: 'var(--s1)' }}
+                  />
+
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button onClick={() => setPayOpen(false)} style={{ flex: 1, padding: '7px 0', borderRadius: 6, border: '1px solid var(--bd)', background: 'var(--s2)', color: 'var(--t2)', fontSize: 'var(--text-xs)', fontWeight: 600, cursor: 'pointer' }}>
+                      Cancel
+                    </button>
+                    <button
+                      onClick={handleSavePayment}
+                      disabled={paySaving || !payAmount.trim() || (payType === 'Other' && !payOther.trim())}
+                      style={{ flex: 1, padding: '7px 0', borderRadius: 6, border: 'none', background: 'var(--p)', color: '#fff', fontSize: 'var(--text-xs)', fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5, opacity: (!payAmount.trim() || (payType === 'Other' && !payOther.trim())) ? 0.5 : 1 }}
+                    >
+                      {paySaving ? <Loader2 size={12} style={{ animation: 'spin .7s linear infinite' }}/> : <Check size={12}/>}
+                      Save
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
             {student.caseSerial&&<div style={{ fontSize:'var(--text-xs)', color:'var(--t3)', fontFamily:'var(--fm)', marginTop:2 }}>{student.caseSerial}</div>}
             {student.counsellorName&&<div style={{ fontSize:'var(--text-xs)', color:'var(--t3)', fontFamily:'var(--fu)', marginTop:2, display:'flex', alignItems:'center', gap:4 }}><User size={10}/> {student.counsellorName}</div>}
