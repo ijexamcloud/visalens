@@ -658,7 +658,7 @@ function BulkActionBar({ selectedIds, allFiltered, counsellorOptions, onBulkStat
 /* ════════════════════════════════════════════════════════════════════════
    QUICK-PEEK DRAWER 
 ════════════════════════════════════════════════════════════════════════ */
-function QuickPeekDrawer({ student, onClose, onOpenFull, onStatusChange, onNoteUpdate, savingId, policyAlerts, inboxAlerts=[] }) {
+function QuickPeekDrawer({ student, onClose, onOpenFull, onStatusChange, onNoteUpdate, onPaymentUpdate, savingId, policyAlerts, inboxAlerts=[] }) {
   const [contact,    setContact]    = useState({ phone: '', email: '' });
   const [logText,    setLogText]    = useState('');
   const [logSaving,  setLogSaving]  = useState(false);
@@ -745,7 +745,7 @@ function QuickPeekDrawer({ student, onClose, onOpenFull, onStatusChange, onNoteU
     const ts = new Date().toISOString();
     setPaySaving(true);
 
-    // Persist payment status to DB
+    // 1. Persist payment status to DB
     if (s?.org_id) {
       try {
         const { error } = await supabase.from('cases')
@@ -757,17 +757,20 @@ function QuickPeekDrawer({ student, onClose, onOpenFull, onStatusChange, onNoteU
       }
     }
 
-    // Also log to activity ledger
+    // 2. Format and save the system note for the Activity Ledger
     const logStr = `[System] Payment recorded: ${actualType} (${payAmount.trim()})`;
     const updatedNotes = await appendNoteEntry(student.id, localNotes, logStr);
+
+    // 3. Update the local UI state (THIS IS WHERE YOUR NEW CODE GOES)
     if (updatedNotes !== null) {
       setLocalNotes(updatedNotes);
       onNoteUpdate && onNoteUpdate(student.id, updatedNotes);
+      
+      setLocalPaymentStatus('Paid');
+      onPaymentUpdate && onPaymentUpdate(student.id, 'Paid'); // <--- Parent Sync!
     }
 
-    // Optimistic UI update for the badge in this drawer
-    setLocalPaymentStatus('Paid');
-
+    // 4. Reset and close the popover
     setPaySaving(false);
     setPayOpen(false);
     setPayOther('');
@@ -795,86 +798,19 @@ function QuickPeekDrawer({ student, onClose, onOpenFull, onStatusChange, onNoteU
   </span>
 )}
             </div>
-            {/* THE INTERACTIVE PAYMENT BADGE */}
-            <div style={{ position: 'relative', marginTop: 8 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                <button
-                  onClick={() => setPayOpen(!payOpen)}
-                  style={{
-                    fontSize: 10, fontWeight: 700, padding: '4px 10px', borderRadius: 6, fontFamily: 'var(--fu)',
-                    background: localPaymentStatus === 'Paid' ? 'rgba(5,150,105,.1)' : 'rgba(255,216,217,.5)',
-                    color: localPaymentStatus === 'Paid' ? '#059669' : '#FC471C',
-                    border: `1px solid ${localPaymentStatus === 'Paid' ? 'rgba(5,150,105,.2)' : 'rgba(252,71,28,.2)'}`,
-                    cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5, transition: 'all var(--fast)'
-                  }}
-                >
-                  {localPaymentStatus === 'Paid' ? '✓ Deposit Paid' : 'Fees Unpaid'}
-                  <ChevronDown size={11} style={{ transform: payOpen ? 'rotate(180deg)' : 'none', transition: 'transform .2s' }}/>
-                </button>
-
-                <span style={{ fontSize: 10, color: 'var(--t3)', fontFamily: 'var(--fu)', display: 'flex', alignItems: 'center', gap: 4 }}>
-                  <Users size={10}/> Source: {student.referralSource || '—'}
-                </span>
-              </div>
-
-              {/* THE CONDITIONAL PAYMENT POPOVER */}
-              {payOpen && (
-                <div style={{
-                  position: 'absolute', top: '100%', left: 0, marginTop: 8, zIndex: 400,
-                  background: 'var(--s1)', border: '1px solid var(--bd)', borderRadius: 12,
-                  boxShadow: 'var(--sh3)', width: 260, padding: 16, animation: 'sdb-fade-in .15s ease'
-                }}>
-                  <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--t1)', marginBottom: 12, fontFamily: 'var(--fu)' }}>
-                    Record New Payment
-                  </div>
-
-                  <select
-                    value={payType}
-                    onChange={e => setPayType(e.target.value)}
-                    style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid var(--bd)', marginBottom: payType === 'Other' ? 8 : 12, fontSize: 'var(--text-xs)', fontFamily: 'var(--fu)', background: 'var(--s2)', color: 'var(--t1)' }}
-                  >
-                    <option value="Application Fee">Application Fee</option>
-                    <option value="Initial Deposit / CAS Fee">Initial Deposit / CAS Fee</option>
-                    <option value="Semester 1 Fee">Semester 1 Fee</option>
-                    <option value="Full Annual Fee">Full Annual Fee</option>
-                    <option value="IHS Fee">IHS Fee</option>
-                    <option value="Visa / Embassy Fee">Visa / Embassy Fee</option>
-                    <option value="Other">Other (Specify...)</option>
-                  </select>
-
-                  {payType === 'Other' && (
-                    <input
-                      autoFocus
-                      placeholder="e.g. Courier charges"
-                      value={payOther}
-                      onChange={e => setPayOther(e.target.value)}
-                      style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid var(--bd)', marginBottom: 12, fontSize: 'var(--text-xs)', fontFamily: 'var(--fu)', background: 'var(--s1)' }}
-                    />
-                  )}
-
-                  <input
-                    placeholder="Amount (e.g. £2,000)"
-                    value={payAmount}
-                    onChange={e => setPayAmount(e.target.value)}
-                    onKeyDown={e => { if (e.key === 'Enter') handleSavePayment(); }}
-                    style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid var(--bd)', marginBottom: 14, fontSize: 'var(--text-xs)', fontFamily: 'var(--fu)', background: 'var(--s1)' }}
-                  />
-
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <button onClick={() => setPayOpen(false)} style={{ flex: 1, padding: '7px 0', borderRadius: 6, border: '1px solid var(--bd)', background: 'var(--s2)', color: 'var(--t2)', fontSize: 'var(--text-xs)', fontWeight: 600, cursor: 'pointer' }}>
-                      Cancel
-                    </button>
-                    <button
-                      onClick={handleSavePayment}
-                      disabled={paySaving || !payAmount.trim() || (payType === 'Other' && !payOther.trim())}
-                      style={{ flex: 1, padding: '7px 0', borderRadius: 6, border: 'none', background: 'var(--p)', color: '#fff', fontSize: 'var(--text-xs)', fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5, opacity: (!payAmount.trim() || (payType === 'Other' && !payOther.trim())) ? 0.5 : 1 }}
-                    >
-                      {paySaving ? <Loader2 size={12} style={{ animation: 'spin .7s linear infinite' }}/> : <Check size={12}/>}
-                      Save
-                    </button>
-                  </div>
-                </div>
-              )}
+            {/* THE STATIC STATUS INDICATOR (Header) */}
+            <div style={{ display:'flex', alignItems:'center', gap:6, flexWrap:'wrap', marginTop: 6 }}>
+              <span style={{
+                fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 6, fontFamily: 'var(--fu)',
+                background: localPaymentStatus === 'Paid' ? 'rgba(5,150,105,.1)' : 'rgba(255,216,217,.5)',
+                color: localPaymentStatus === 'Paid' ? '#059669' : '#FC471C',
+                border: `1px solid ${localPaymentStatus === 'Paid' ? 'rgba(5,150,105,.2)' : 'rgba(252,71,28,.2)'}`
+              }}>
+                {localPaymentStatus === 'Paid' ? '✓ Deposit Paid' : 'Fees Unpaid'}
+              </span>
+              <span style={{ fontSize: 10, color: 'var(--t3)', fontFamily: 'var(--fu)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                <Users size={10}/> Source: {student.referralSource || 'Direct'}
+              </span>
             </div>
             {student.caseSerial&&<div style={{ fontSize:'var(--text-xs)', color:'var(--t3)', fontFamily:'var(--fm)', marginTop:2 }}>{student.caseSerial}</div>}
             {student.counsellorName&&<div style={{ fontSize:'var(--text-xs)', color:'var(--t3)', fontFamily:'var(--fu)', marginTop:2, display:'flex', alignItems:'center', gap:4 }}><User size={10}/> {student.counsellorName}</div>}
@@ -1052,6 +988,82 @@ function QuickPeekDrawer({ student, onClose, onOpenFull, onStatusChange, onNoteU
                 </div>
               </div>
             )}
+
+            {/* FINANCIALS & PAYMENTS SECTION (Body) */}
+            <div style={{ padding:'0 20px 16px' }}>
+              <div style={{ fontSize:10, fontWeight:700, textTransform:'uppercase', letterSpacing:'.07em', color:'var(--t3)', fontFamily:'var(--fu)', marginBottom:8 }}>Financial Ledger</div>
+
+              <div style={{ background: 'var(--s2)', border: '1px solid var(--bd)', borderRadius: 8, overflow: 'hidden' }}>
+                <button
+                  onClick={() => setPayOpen(!payOpen)}
+                  style={{
+                    width: '100%', padding: '10px 12px', background: 'transparent', border: 'none',
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer',
+                    fontSize: 'var(--text-sm)', color: 'var(--t1)', fontFamily: 'var(--fu)'
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <div style={{ width:24, height:24, borderRadius:6, background:'rgba(5,150,105,.1)', display:'flex', alignItems:'center', justifyContent:'center', color:'#059669' }}>
+                      <CheckSquare size={12}/>
+                    </div>
+                    <span style={{ fontWeight: 600 }}>Record a Payment</span>
+                  </div>
+                  <ChevronDown size={14} style={{ transform: payOpen ? 'rotate(180deg)' : 'none', transition: 'transform .2s', color: 'var(--t3)' }}/>
+                </button>
+
+                {payOpen && (
+                  <div style={{ padding: '0 12px 12px', borderTop: '1px solid var(--bd)', background: 'var(--s1)', animation: 'sdb-fade-in .15s ease' }}>
+                    <div style={{ marginTop: 12 }}>
+                      <select
+                        value={payType}
+                        onChange={e => setPayType(e.target.value)}
+                        style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid var(--bd)', marginBottom: payType === 'Other' ? 8 : 12, fontSize: 'var(--text-xs)', fontFamily: 'var(--fu)', background: 'var(--s2)', color: 'var(--t1)' }}
+                      >
+                        <option value="Application Fee">Application Fee</option>
+                        <option value="Initial Deposit / CAS Fee">Initial Deposit / CAS Fee</option>
+                        <option value="Semester 1 Fee">Semester 1 Fee</option>
+                        <option value="Full Annual Fee">Full Annual Fee</option>
+                        <option value="IHS Fee">IHS Fee</option>
+                        <option value="Visa / Embassy Fee">Visa / Embassy Fee</option>
+                        <option value="Other">Other (Specify...)</option>
+                      </select>
+
+                      {payType === 'Other' && (
+                        <input
+                          autoFocus
+                          placeholder="e.g. Courier charges"
+                          value={payOther}
+                          onChange={e => setPayOther(e.target.value)}
+                          style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid var(--bd)', marginBottom: 12, fontSize: 'var(--text-xs)', fontFamily: 'var(--fu)', background: 'var(--s2)' }}
+                        />
+                      )}
+
+                      <input
+                        placeholder="Amount (e.g. £2,000)"
+                        value={payAmount}
+                        onChange={e => setPayAmount(e.target.value)}
+                        onKeyDown={e => { if (e.key === 'Enter') handleSavePayment(); }}
+                        style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid var(--bd)', marginBottom: 12, fontSize: 'var(--text-xs)', fontFamily: 'var(--fu)', background: 'var(--s2)' }}
+                      />
+
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <button onClick={() => setPayOpen(false)} style={{ flex: 1, padding: '7px 0', borderRadius: 6, border: '1px solid var(--bd)', background: 'var(--s2)', color: 'var(--t2)', fontSize: 'var(--text-xs)', fontWeight: 600, cursor: 'pointer' }}>
+                          Cancel
+                        </button>
+                        <button
+                          onClick={handleSavePayment}
+                          disabled={paySaving || !payAmount.trim() || (payType === 'Other' && !payOther.trim())}
+                          style={{ flex: 1, padding: '7px 0', borderRadius: 6, border: 'none', background: 'var(--p)', color: '#fff', fontSize: 'var(--text-xs)', fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5, opacity: (!payAmount.trim() || (payType === 'Other' && !payOther.trim())) ? 0.5 : 1 }}
+                        >
+                          {paySaving ? <Loader2 size={12} style={{ animation: 'spin .7s linear infinite' }}/> : <Check size={12}/>}
+                          Save Payment
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
 
             {targets.length > 0 && (
               <div style={{ padding:'0 20px 16px' }}>
@@ -1314,6 +1326,11 @@ export default function StudentDashboard({ onLoad, totalCases: totalCasesProp, l
     _nbaCache.delete(caseId);
   },[]);
 
+const handlePaymentUpdate = useCallback((caseId, newStatus) => {
+    setCases(prev => prev.map(c => c.id === caseId ? { ...c, paymentStatus: newStatus } : c));
+    setPeekStudent(prev => prev?.id === caseId ? { ...prev, paymentStatus: newStatus } : prev);
+  }, []);
+
   const handleMorningBrief = useCallback(async () => {
     setBriefOpen(true);
     if (briefText) return; 
@@ -1376,7 +1393,19 @@ export default function StudentDashboard({ onLoad, totalCases: totalCasesProp, l
         .sdb-sticky-sidebar { -ms-overflow-style: none; scrollbar-width: none; }
       `}</style>
 
-      {peekStudent&&<QuickPeekDrawer student={peekStudent} onClose={()=>setPeekStudent(null)} onOpenFull={onLoad} onStatusChange={handleStatusChange} onNoteUpdate={handleNoteUpdate} savingId={savingId} policyAlerts={policyAlerts} inboxAlerts={inboxAlerts}/>}
+{peekStudent && (
+        <QuickPeekDrawer 
+          student={peekStudent} 
+          onClose={()=>setPeekStudent(null)} 
+          onOpenFull={onLoad} 
+          onStatusChange={handleStatusChange} 
+          onNoteUpdate={handleNoteUpdate} 
+          onPaymentUpdate={handlePaymentUpdate} 
+          savingId={savingId} 
+          policyAlerts={policyAlerts} 
+          inboxAlerts={inboxAlerts}
+        />
+      )}
       {someSelected&&<BulkActionBar selectedIds={selectedIds} allFiltered={filtered} counsellorOptions={counsellorOptions} onBulkStatus={handleBulkStatus} onBulkReassign={handleBulkReassign} onClear={()=>setSelectedIds(new Set())} bulkSaving={bulkSaving}/>}
 
       {/* ══ MORNING BRIEF MODAL ════════════════════════════════════════ */}
