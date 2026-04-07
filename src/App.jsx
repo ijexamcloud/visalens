@@ -6665,7 +6665,7 @@ function PersonClarificationUI({ preScanData, onConfirm, onSkip, loading, onRemo
 /* ─── MAIN APP ───────────────────────────────────────────────────── */
 
 // ── Summary columns (no heavy blobs) ─────────────────────────────────────────
-const CASE_SUMMARY_COLS = "id, case_serial, created_at, updated_at, status_updated_at, student_name, counsellor_name, overall_score, target_country, preferred_offer_index, application_targets, lead_status, expiry_date, expiry_doc_type";
+const CASE_SUMMARY_COLS = "id, case_serial, created_at, updated_at, status_updated_at, student_name, counsellor_name, overall_score, target_country, preferred_offer_index, application_targets, lead_status, expiry_date, expiry_doc_type, referral_source, payment_status";
 
 function _mapSummaryRow(r) {
   return {
@@ -6684,6 +6684,8 @@ function _mapSummaryRow(r) {
     leadStatus:          r.lead_status || "None",
     expiryDate:          r.expiry_date || null,
     expiryDocType:       r.expiry_doc_type || null,
+    referralSource:      r.referral_source || 'Direct',
+    paymentStatus:       r.payment_status || 'Unpaid',
     fromSupabase:        true,
     _summaryOnly:        true,
   };
@@ -6781,6 +6783,8 @@ async function loadFullCase(id) {
       targetCountry:       r.target_country || "",
       applicationTargets:  Array.isArray(r.application_targets) ? r.application_targets : [],
       leadStatus:          r.lead_status || "None",
+      referralSource:      r.referral_source || 'Direct',
+      paymentStatus:       r.payment_status || 'Unpaid',
       fromSupabase:        true,
       _summaryOnly:        false,
     };
