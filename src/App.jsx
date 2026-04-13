@@ -66,7 +66,11 @@ import {
   ALLOWED_EXTENSIONS, ALLOWED_MIME_TYPES, UNSUPPORTED_BUT_COMMON
 } from './utils/docMeta';
 import {
-  loadGoogleScript, preloadDriveScripts, clearDriveToken, hasDriveToken
+  loadGoogleScript, preloadDriveScripts,
+  getAccessToken, clearDriveToken, hasDriveToken,
+  openDrivePicker, downloadDriveFile,
+  getDriveRootFolderId, createDriveSubfolder, uploadFileToDrive,
+  DRIVE_TOKEN_KEY
 } from './utils/googleDrive';
 import {
   COUNTRY_META, COUNTRY_ISO2, COUNTRY_CURRENCY, getCountryMeta,
