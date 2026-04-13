@@ -2,22 +2,21 @@
 -- VisaLens B2B Schema — Full Setup
 -- Run this in: Supabase Dashboard → SQL Editor → New Query
 -- Safe to re-run (uses IF NOT EXISTS / OR REPLACE)
--- Last synced to live DB: 2026
 -- ============================================================
 
 -- ── ORGANIZATIONS TABLE ─────────────────────────────────────
 create table if not exists organizations (
-  id                  uuid primary key default gen_random_uuid(),
-  name                text not null,
-  email               text unique not null,
-  plan                text not null default 'starter',    -- starter | pro | enterprise
-  analyses_remaining  integer not null default 100,
-  analyses_total      integer not null default 100,
-  is_active           boolean not null default true,
-  access_code         text unique,
-  notes               text,
-  created_at          timestamptz not null default now(),
-  last_used_at        timestamptz
+  id                uuid primary key default gen_random_uuid(),
+  name              text not null,
+  email             text unique not null,
+  plan              text not null default 'starter',    -- starter | pro | enterprise
+  credits_remaining integer not null default 100,
+  credits_total     integer not null default 100,
+  is_active         boolean not null default true,
+  access_code       text unique,
+  notes             text,
+  created_at        timestamptz not null default now(),
+  last_used_at      timestamptz
 );
 
 -- ── USAGE LOG TABLE ─────────────────────────────────────────
@@ -27,10 +26,8 @@ create table if not exists usage_log (
   model         text,
   input_tokens  integer default 0,
   output_tokens integer default 0,
-  analyses_used integer default 1,
+  credits_used  integer default 1,
   endpoint      text default 'proxy',
-  cache_read    integer default 0,
-  cache_write   integer default 0,
   created_at    timestamptz not null default now()
 );
 
@@ -38,7 +35,7 @@ create table if not exists usage_log (
 -- Stores saved student cases per org
 create table if not exists cases (
   id                    uuid primary key default gen_random_uuid(),
-  org_id                uuid not null references organizations(id) on delete cascade,
+  org_id                uuid references organizations(id) on delete cascade,
   student_name          text,
   profile_data          jsonb,
   results               jsonb,
@@ -47,10 +44,9 @@ create table if not exists cases (
   preferred_offer_index integer default 0,
   counsellor_name       text,
   overall_score         integer default 0,
-  score_data            jsonb default '{}',
   target_country        text,
-  created_at            timestamptz default now(),
-  updated_at            timestamptz default now()
+  created_at            timestamptz not null default now(),
+  updated_at            timestamptz not null default now()
 );
 
 -- ── INDEXES ─────────────────────────────────────────────────
@@ -71,6 +67,11 @@ alter table usage_log enable row level security;
 -- (org_id is sent in every request and validated server-side)
 alter table cases enable row level security;
 
+-- Allow anon key to SELECT cases for their org only
+-- org_id must be passed as a claim or matched via app logic
+-- Since we validate org_id server-side in the proxy, we allow
+-- the anon key to operate on cases where org_id is provided.
+-- This is safe because the org_id itself comes from a validated session.
 drop policy if exists "cases_anon_select" on cases;
 create policy "cases_anon_select" on cases
   for select using (true);  -- filtered by org_id in app query (.eq('org_id', ORG_ID))
@@ -108,28 +109,24 @@ select
   o.name,
   o.email,
   o.plan,
-  o.analyses_remaining,
-  o.analyses_total,
+  o.credits_remaining,
+  o.credits_total,
   o.is_active,
   o.access_code,
   o.created_at,
   o.last_used_at,
-  coalesce(u.calls_today, 0)        as calls_today,
-  coalesce(u.calls_this_month, 0)   as calls_this_month,
-  coalesce(u.total_calls, 0)        as total_calls,
-  coalesce(u.total_tokens, 0)       as total_tokens,
-  coalesce(u.total_cache_read, 0)   as total_cache_read,
-  coalesce(u.total_cache_write, 0)  as total_cache_write,
-  coalesce(c.total_cases, 0)        as total_cases
+  coalesce(u.calls_today, 0)       as calls_today,
+  coalesce(u.calls_this_month, 0)  as calls_this_month,
+  coalesce(u.total_calls, 0)       as total_calls,
+  coalesce(u.total_tokens, 0)      as total_tokens,
+  coalesce(c.total_cases, 0)       as total_cases
 from organizations o
 left join lateral (
   select
     count(*) filter (where created_at >= current_date)               as calls_today,
     count(*) filter (where created_at >= date_trunc('month', now())) as calls_this_month,
     count(*)                                                          as total_calls,
-    sum(input_tokens + output_tokens + cache_read + cache_write)      as total_tokens,
-    sum(cache_read)                                                   as total_cache_read,
-    sum(cache_write)                                                  as total_cache_write
+    sum(input_tokens + output_tokens)                                 as total_tokens
   from usage_log
   where org_id = o.id
 ) u on true
@@ -139,20 +136,20 @@ left join lateral (
   where org_id = o.id
 ) c on true;
 
--- ── STORED PROCEDURE: top up analyses ───────────────────────
-create or replace function topup_analyses(
-  p_org_id   uuid,
-  p_analyses integer,
-  p_notes    text default null
+-- ── STORED PROCEDURE: top up credits ────────────────────────
+create or replace function topup_credits(
+  p_org_id uuid,
+  p_credits integer,
+  p_notes text default null
 ) returns void
 language plpgsql security definer as $$
 begin
   update organizations
   set
-    analyses_remaining = analyses_remaining + p_analyses,
-    analyses_total     = analyses_total + p_analyses,
+    credits_remaining = credits_remaining + p_credits,
+    credits_total     = credits_total + p_credits,
     notes = case when p_notes is not null then
-              coalesce(notes, '') || e'\n' || now()::text || ': Topped up ' || p_analyses || ' analyses. ' || p_notes
+              coalesce(notes, '') || e'\n' || now()::text || ': Topped up ' || p_credits || ' credits. ' || p_notes
             else notes end
   where id = p_org_id;
 
@@ -169,22 +166,22 @@ create or replace function add_org(
   p_email       text,
   p_access_code text,
   p_plan        text    default 'starter',
-  p_analyses    integer default 200,
+  p_credits     integer default 200,
   p_notes       text    default null
 ) returns uuid
 language plpgsql security definer as $$
 declare
   v_id uuid;
 begin
-  insert into organizations (name, email, plan, analyses_remaining, analyses_total, access_code, notes)
-  values (p_name, p_email, p_plan, p_analyses, p_analyses, upper(p_access_code), p_notes)
+  insert into organizations (name, email, plan, credits_remaining, credits_total, access_code, notes)
+  values (p_name, p_email, p_plan, p_credits, p_credits, upper(p_access_code), p_notes)
   returning id into v_id;
   return v_id;
 end;
 $$;
 
 -- ── SAMPLE DATA ─────────────────────────────────────────────
-insert into organizations (name, email, plan, analyses_remaining, analyses_total, access_code, notes)
+insert into organizations (name, email, plan, credits_remaining, credits_total, access_code, notes)
 values (
   'Demo Agency',
   'demo@visalens.io',
@@ -200,5 +197,3 @@ on conflict (email) do nothing;
 -- select * from org_dashboard;
 -- To add a new client:
 -- select add_org('Acme Consulting', 'acme@example.com', 'ACME-2026', 'pro', 500);
--- To top up an org:
--- select topup_analyses('org-uuid-here', 100, 'Monthly renewal');

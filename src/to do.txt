@@ -1,0 +1,6 @@
+things to do:
+2. expiry radar badge needs accurate counter
+3. check mrz validator, and passport and identity prompts in app.jsx missing attempts.
+7. fix badges in main nav bar
+8. design a smarter way to integrate the analyzer to student dashboard. ongoing
+

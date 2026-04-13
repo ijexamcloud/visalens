@@ -1,223 +1,81 @@
-import React, { useState, useRef, useCallback, useEffect } from 'react';
+import React, { useState, useRef, useCallback, useEffect, createContext, useContext } from 'react';
+
+// ── Global chat context — lets any component call openChat() without prop drilling ──
+export const ChatContext = createContext(null);
+export function useChat() { return useContext(ChatContext); }
+
+// ── chatBridge: module-level singleton so any imported component can open a chat
+//    panel without prop drilling. VisaLensApp registers openChat here on mount.
+//    Usage anywhere: import { chatBridge } from './App'; chatBridge.open(caseId, name)
+export const chatBridge = { open: () => {} };
 import './App.css';
 import JSZip from 'jszip';
 import mammoth from 'mammoth'; // ← ADD HERE, after JSZip
 import AdminPanel from './AdminPanel';
 import AgencyPanel from './AgencyPanel';
 import ProgramMatcher from './ProgramMatcher';
-import ExpiryCard, { computeSoonestExpiry } from './ExpiryCard';
+import ExpiryCard, { computeSoonestExpiry, computeDocScore } from './ExpiryCard';
+import { viabilityScore } from './docScore';
 import AlertsPage from './AlertsPage';
 import HomeDashboard from './HomeDashboard';
 import './HomeDashboard.css';
 import InboxDashboard from './InboxDashboard';
 import CalendarPage from './CalendarPage';
 import StudentDashboard from './StudentDashboard';
+import RadarMatrix from './RadarMatrix';
+import { computeDocScore as _computeDocScoreForRadar, viabilityScore as _viabilityScoreForRadar } from './docScore';
+import CaseHistory from './CaseHistory';
+import AnalyticsDashboard from './AnalyticsDashboard';
+import { MockInterview } from './mockinterview'; // ✅ named importmo
+import PublicInterview from './PublicInterview';
+import LoginPage from './LoginPage';
+import NotificationBell from './NotificationBell';
+import ReactDOM from 'react-dom';
 
 import {
   AlertCircle, AlertTriangle, ArrowUpRight, BarChart3, Bell, BookOpen, Building2, Calendar, Check, CheckCircle,
-  ChevronDown, Clock, Copy, CreditCard, DollarSign, Download, Edit3, Eye, EyeOff,
+  ChevronDown, Clock, ClipboardList, Copy, CreditCard, DollarSign, Download, Edit3, Eye, EyeOff,
   File, FileSpreadsheet, FileText, Flag, FolderDown, FolderOpen, Globe, GraduationCap,
-  Info, Languages, LayoutDashboard, ListChecks, Loader2, Mail, MessageSquare,
-  Moon, Pencil, Plus, Printer, RefreshCw, Save, Search, Send, ShieldCheck, Star, Sun,
+  Info, Languages, LayoutDashboard, ListChecks, Loader2, Mail, MessageSquare, Mic,
+  Moon, Pencil, Plus, Printer, RefreshCw, Reply, Save, Search, Send, ShieldCheck, Star, Sun,
   Target, Trash2, TriangleAlert, Upload, User, Users, X, XCircle, ZoomIn, Dot
 } from 'lucide-react';
 
 import { createClient } from '@supabase/supabase-js';
 
+// ── Imports from extracted utility files (Phase 1) ─────────────────────────
+import {
+  getOrgSession, setOrgSession, clearOrgSession, getAuthHeaders,
+  isTokenExpiringSoon, refreshTokenIfNeeded, authedFetch, withOrg
+} from './utils/session';
+import {
+  _slugify, _initials, _isoDate, daysUntilExpiry,
+  scoreCol, scoreBadge, scoreLabel
+} from './utils/format';
+import {
+  parseGPA, parseIELTS, parseFinancial, parseCurrencyAmount,
+  estimateTokens, tokenTierClient, estimateTokensIfConverted,
+  parseCSV, normaliseRow, csvToRequirements, downloadCSV,
+  resolveOffer, migrateOfferLetter, lookupFundsRequired
+} from './utils/parsers';
+import {
+  mrzCharValue, mrzComputeCheckDigit, validatePassportNumber
+} from './utils/mrz';
+import {
+  DOC_TYPES, getDT, TRANSCRIPT_LEVELS, guessType,
+  ALLOWED_EXTENSIONS, ALLOWED_MIME_TYPES, UNSUPPORTED_BUT_COMMON
+} from './utils/docMeta';
+import {
+  loadGoogleScript, preloadDriveScripts, clearDriveToken, hasDriveToken
+} from './utils/googleDrive';
+import {
+  COUNTRY_META, COUNTRY_ISO2, COUNTRY_CURRENCY, getCountryMeta,
+  VISA_DOC_TYPES, GENERIC_VISA_DOCS, UNIVERSITY_DATA, TEMPLATE_CSV
+} from './constants/countries';
+// ─────────────────────────────────────────────────────────────────────────
+
 const PROXY_URL = "https://visalens-proxy.ijecloud.workers.dev";
 
-/* ─── GOOGLE DRIVE CONFIG ──────────────────────────────────────────── */
-const GOOGLE_API_KEY    = import.meta.env.VITE_GOOGLE_API_KEY;
-const GOOGLE_CLIENT_ID  = import.meta.env.VITE_GOOGLE_CLIENT_ID;
-const DRIVE_SCOPES      = "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.readonly";
-const PICKER_APP_ID     = GOOGLE_CLIENT_ID ? GOOGLE_CLIENT_ID.split("-")[0] : "";
-const DRIVE_FOLDER_NAME = "VisaLens Reports";
-const DRIVE_TOKEN_KEY   = "visalens_gdrive_token";
-
-const ALLOWED_EXTENSIONS = new Set(["pdf", "jpg", "jpeg", "png", "txt", "docx"]);
-const ALLOWED_MIME_TYPES = new Set([
-  "application/pdf",
-  "image/jpeg",
-  "image/png",
-  "image/jpg",
-  "text/plain",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-]);
-const UNSUPPORTED_BUT_COMMON = new Set(["odt", "doc", "xls", "xlsx", "ppt", "pptx"]);
-
-// ← ADD THIS FUNCTION HERE, outside the component
-async function extractTextFromDocx(file) {
-  const arrayBuffer = await file.arrayBuffer();
-  const result = await mammoth.extractRawText({ arrayBuffer });
-  return result.value;
-}
-
-// Load a Google API script tag once
-function loadGoogleScript(src) {
-  return new Promise((resolve, reject) => {
-    if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
-    const s = document.createElement("script");
-    s.src = src; s.async = true; s.defer = true;
-    s.onload = resolve; s.onerror = reject;
-    document.head.appendChild(s);
-  });
-}
-
-// Preload state — track what's already loaded so button tap is instant
-let _gsiReady      = false;
-let _gapiReady     = false;
-let _pickerReady   = false;
-let _tokenClient   = null;
-let _preloadPromise = null;
-
-// Called on app mount AND on button hover/touch — loads all scripts silently
-// in the background so the actual tap handler has zero async work before
-// requestAccessToken(), which Safari requires to trust the popup as user-initiated.
-function preloadDriveScripts() {
-  if (_preloadPromise) return _preloadPromise;
-  _preloadPromise = (async () => {
-    try {
-      await Promise.all([
-        loadGoogleScript("https://accounts.google.com/gsi/client")
-          .then(() => { _gsiReady = true; }),
-        loadGoogleScript("https://apis.google.com/js/api.js")
-          .then(() => new Promise(res =>
-            window.gapi.load("picker", () => { _gapiReady = true; _pickerReady = true; res(); })
-          )),
-      ]);
-    } catch {}
-  })();
-  return _preloadPromise;
-}
-
-// Safari fix: requestAccessToken MUST be called synchronously from a user gesture.
-// Scripts are preloaded so this function only does a token cache check (synchronous)
-// then calls requestAccessToken — no awaits block it from the tap.
-async function getAccessToken(forcePrompt = false) {
-  if (!_gsiReady) {
-    await loadGoogleScript("https://accounts.google.com/gsi/client");
-    _gsiReady = true;
-  }
-  if (!forcePrompt) {
-    try {
-      const stored = sessionStorage.getItem(DRIVE_TOKEN_KEY);
-      if (stored) { const t = JSON.parse(stored); if (t.expires_at > Date.now() + 60000) return t.access_token; }
-    } catch {}
-  }
-  return new Promise((resolve, reject) => {
-    _tokenClient = window.google.accounts.oauth2.initTokenClient({
-      client_id: GOOGLE_CLIENT_ID,
-      scope: DRIVE_SCOPES,
-      callback: (resp) => {
-        if (resp.error) { reject(new Error(resp.error)); return; }
-        const token = {
-          access_token: resp.access_token,
-          expires_at: Date.now() + (resp.expires_in || 3600) * 1000,
-        };
-        try { sessionStorage.setItem(DRIVE_TOKEN_KEY, JSON.stringify(token)); } catch {}
-        resolve(resp.access_token);
-      },
-    });
-    _tokenClient.requestAccessToken({ prompt: forcePrompt ? "consent" : "" });
-  });
-}
-function clearDriveToken() {
-  try { sessionStorage.removeItem(DRIVE_TOKEN_KEY); } catch {}
-}
-function hasDriveToken() {
-  try {
-    const stored = sessionStorage.getItem(DRIVE_TOKEN_KEY);
-    if (!stored) return false;
-    const t = JSON.parse(stored);
-    return t.expires_at > Date.now() + 60000;
-  } catch { return false; }
-}
-
-// ── Drive Picker (Safari-safe) ───────────────────────────────────────
-// Scripts already loaded from preload — no awaits before getAccessToken()
-async function openDrivePicker(onFilePicked) {
-  if (!_gapiReady) {
-    await loadGoogleScript("https://apis.google.com/js/api.js");
-    await new Promise(res => window.gapi.load("picker", () => { _gapiReady = true; _pickerReady = true; res(); }));
-  }
-  const token = await getAccessToken();
-
-  const docsView = new window.google.picker.DocsView()
-    .setIncludeFolders(true)
-    .setSelectFolderEnabled(false)
-    .setMimeTypes("application/pdf,image/jpeg,image/png,image/jpg,text/plain");
-
-  const picker = new window.google.picker.PickerBuilder()
-    .setAppId(PICKER_APP_ID)
-    .setOAuthToken(token)
-    .setDeveloperKey(GOOGLE_API_KEY)
-    .addView(docsView)
-    .setTitle("Select documents to import")
-    .enableFeature(window.google.picker.Feature.MULTISELECT_ENABLED)
-    .setCallback(async (data) => {
-      if (data.action === window.google.picker.Action.PICKED) {
-        onFilePicked(data.docs);
-      } else if (data.action === window.google.picker.Action.CANCEL) {
-        onFilePicked([]);
-      }
-    })
-    .build();
-  picker.setVisible(true);
-}
-
-// Download a Drive file as a Blob
-async function downloadDriveFile(fileId, mimeType, token) {
-  const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
-  const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-  if (!resp.ok) {
-    const errText = await resp.text();
-    throw new Error(`Drive download failed: ${resp.status} — ${errText}`);
-  }
-  return await resp.blob();
-}
-
-// ── Drive Upload helpers ─────────────────────────────────────────────
-async function getDriveRootFolderId(token) {
-  // Find or create "VisaLens Reports" folder
-  const searchResp = await fetch(
-    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(`mimeType='application/vnd.google-apps.folder' and name='${DRIVE_FOLDER_NAME}' and trashed=false`)}&fields=files(id,name)`,
-    { headers: { Authorization: `Bearer ${token}` } }
-  );
-  const searchData = await searchResp.json();
-  if (searchData.files?.length > 0) return searchData.files[0].id;
-
-  // Create it
-  const createResp = await fetch("https://www.googleapis.com/drive/v3/files", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ name: DRIVE_FOLDER_NAME, mimeType: "application/vnd.google-apps.folder" }),
-  });
-  const created = await createResp.json();
-  return created.id;
-}
-
-async function createDriveSubfolder(token, parentId, folderName) {
-  const resp = await fetch("https://www.googleapis.com/drive/v3/files", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ name: folderName, mimeType: "application/vnd.google-apps.folder", parents: [parentId] }),
-  });
-  const data = await resp.json();
-  return data.id;
-}
-
-async function uploadFileToDrive(token, folderId, file, filename) {
-  const metadata = { name: filename, parents: [folderId] };
-  const form = new FormData();
-  form.append("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }));
-  form.append("file", file);
-  const resp = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}` },
-    body: form,
-  });
-  return await resp.json();
-}
 // Singleton to avoid "Multiple GoTrueClient instances" warning during HMR
 if (!window._supabaseInstance) {
   window._supabaseInstance = createClient(
@@ -239,1042 +97,8 @@ const DARK_VARS = {
   "--t3":   "#4A5D7E",
 };
 
-// ── ORG SESSION ──────────────────────────────────────────────────────────────
-// Org identity is now set at login (validated against DB via proxy).
-// No longer baked into the build — one deployment serves all orgs.
-const ORG_SESSION_KEY = "visalens_org_session";
-
-function getOrgSession() {
-  try {
-    const raw = sessionStorage.getItem(ORG_SESSION_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch { return null; }
-}
-
-function setOrgSession(data) {
-  try { sessionStorage.setItem(ORG_SESSION_KEY, JSON.stringify(data)); } catch {}
-}
-
-function clearOrgSession() {
-  try { sessionStorage.removeItem(ORG_SESSION_KEY); } catch {}
-}
-
-// Returns the correct auth headers for the current session type.
-// JWT sessions (RBAC) use Bearer token; legacy access-code sessions use X-Org-Id.
-function getAuthHeaders() {
-  const session = getOrgSession();
-  if (!session) return { "Content-Type": "application/json" };
-  if (session.access_token) {
-    return {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${session.access_token}`,
-    };
-  }
-  // Legacy fallback
-  return {
-    "Content-Type": "application/json",
-    "X-Org-Id": session.org_id || "",
-  };
-}
-
-// ── Token expiry check ────────────────────────────────────────────────────────
-// Returns true if the JWT expires within the next 5 minutes (300 seconds).
-function isTokenExpiringSoon() {
-  const s = getOrgSession();
-  if (!s?.access_token) return false;
-  try {
-    // expires_at from Supabase is a Unix timestamp in seconds
-    if (s.expires_at) {
-      return (s.expires_at - Math.floor(Date.now() / 1000)) < 300;
-    }
-    // Fallback: decode the JWT exp claim
-    const payload = JSON.parse(atob(s.access_token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
-    if (!payload.exp) return false;
-    return (payload.exp - Math.floor(Date.now() / 1000)) < 300;
-  } catch { return false; }
-}
-
-// ── Proactive token refresh using Supabase JS client ─────────────────────────
-// Uses the already-initialised supabase client so the correct URL/anon-key are
-// always used — no manual URL construction, no risk of hitting localhost.
-let _refreshPromise = null; // Deduplicate concurrent refresh calls
-async function refreshTokenIfNeeded() {
-  const s = getOrgSession();
-  if (!s?.access_token || !s?.refresh_token) return; // Legacy / no-op
-  if (!isTokenExpiringSoon()) return;                 // Still fresh
-  if (_refreshPromise) return _refreshPromise;        // Already refreshing
-
-  _refreshPromise = (async () => {
-    try {
-      const { data, error } = await supabase.auth.setSession({
-        access_token:  s.access_token,
-        refresh_token: s.refresh_token,
-      });
-      if (error) throw error;
-      if (data?.session) {
-        const updated = {
-          ...s,
-          access_token:  data.session.access_token,
-          refresh_token: data.session.refresh_token,
-          expires_at:    data.session.expires_at,
-        };
-        setOrgSession(updated);
-      }
-    } catch (e) {
-      console.warn('[VisaLens] Token refresh failed:', e.message);
-    } finally {
-      _refreshPromise = null;
-    }
-  })();
-  return _refreshPromise;
-}
-
-// ── authedFetch — drop-in replacement for fetch() throughout the app ──────────
-// Always ensures the token is fresh before sending. On a 401 it refreshes once
-// and retries. Never retries more than once to avoid infinite loops.
-async function authedFetch(url, options = {}, _isRetry = false) {
-  await refreshTokenIfNeeded();
-  const res = await fetch(url, { ...options, headers: { ...getAuthHeaders(), ...(options.headers || {}) } });
-  if (res.status === 401 && !_isRetry) {
-    // Force a refresh even if we didn't think it was needed (clock skew etc.)
-    const s = getOrgSession();
-    if (s?.refresh_token) {
-      try {
-        const { data } = await supabase.auth.setSession({
-          access_token:  s.access_token,
-          refresh_token: s.refresh_token,
-        });
-        if (data?.session) {
-          setOrgSession({ ...s, access_token: data.session.access_token, refresh_token: data.session.refresh_token, expires_at: data.session.expires_at });
-        }
-      } catch {}
-    }
-    return authedFetch(url, options, true); // Retry exactly once
-  }
-  return res;
-}
-
-// Helper: add org_id to every proxy request body
-function withOrg(body) {
-  const session = getOrgSession();
-  if (session?.org_id) return { ...body, org_id: session.org_id };
-  return body;
-}
 
 
-// localStorage polyfill for window.storage API used in original artifact
-window.storage = {
-  get: async (k) => { const v = localStorage.getItem(k); return v !== null ? {value: v} : null; },
-  set: async (k, v) => { localStorage.setItem(k, String(v)); return {key: k, value: v}; },
-  delete: async (k) => { localStorage.removeItem(k); return {key: k, deleted: true}; },
-  list: async (prefix) => { const keys = Object.keys(localStorage).filter(k => !prefix || k.startsWith(prefix)); return {keys}; }
-};
-
-
-
-/* ─── COUNTRY META LOOKUP ────────────────────────────────────────── */
-const COUNTRY_META = {
-  "United Kingdom": { flag:"🇬🇧", visaType:"UK Student Visa (Tier 4)" },
-  "Finland":        { flag:"🇫🇮", visaType:"Finland Student Residence Permit" },
-  "Germany":        { flag:"🇩🇪", visaType:"Germany Student Visa (Nationales Visum)" },
-  "Canada":         { flag:"🇨🇦", visaType:"Canada Study Permit" },
-  "Australia":      { flag:"🇦🇺", visaType:"Australia Student Visa (Subclass 500)" },
-  "United States":  { flag:"🇺🇸", visaType:"USA F-1 Student Visa" },
-  "Netherlands":    { flag:"🇳🇱", visaType:"Netherlands MVV Student Visa" },
-  "Sweden":         { flag:"🇸🇪", visaType:"Sweden Residence Permit for Studies" },
-  "Ireland":        { flag:"🇮🇪", visaType:"Ireland Student Visa" },
-  "New Zealand":    { flag:"🇳🇿", visaType:"New Zealand Student Visa" },
-};
-function getCountryMeta(c) { return COUNTRY_META[c] || { flag:"🌍", visaType:`${c} Student Visa` }; }
-
-/* ─── COUNTRY ISO-2 MAP (for case serial CC segment) ─────────────────── */
-const COUNTRY_ISO2 = {
-  "United Kingdom":       "GB",
-  "Canada":               "CA",
-  "Australia":            "AU",
-  "United States":        "US",
-  "Germany":              "DE",
-  "Finland":              "FI",
-  "Netherlands":          "NL",
-  "Sweden":               "SE",
-  "Ireland":              "IE",
-  "New Zealand":          "NZ",
-  "France":               "FR",
-  "Italy":                "IT",
-  "Spain":                "ES",
-  "Denmark":              "DK",
-  "Norway":               "NO",
-  "Portugal":             "PT",
-  "Malaysia":             "MY",
-  "Singapore":            "SG",
-  "Japan":                "JP",
-  "South Korea":          "KR",
-  "United Arab Emirates": "AE",
-};
-
-/* ─── CASE SERIAL HELPERS ────────────────────────────────────────────── */
-// Serial format: {ORG}-{CC}-{YYYYMMDD}-{INITIALS}{SEQ}
-// Example:       VISION-GB-20260403-ASM0001
-// Each segment is independently filterable in Supabase:
-//   LIKE 'VISION-%'       → all cases for that agency
-//   LIKE '%-GB-%'         → all UK-bound cases
-//   LIKE '%-20260403-%'   → all cases filed today
-function _slugify(str, maxLen = 6) {
-  return (str || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, maxLen) || "ORG";
-}
-function _initials(fullName, maxLen = 3) {
-  const parts = (fullName || "").trim().split(/\s+/).filter(Boolean);
-  if (!parts.length) return "XX";
-  return parts.slice(0, maxLen).map(p => p[0].toUpperCase()).join("");
-}
-function _isoDate(d = new Date()) {
-  return `${d.getUTCFullYear()}${String(d.getUTCMonth()+1).padStart(2,"0")}${String(d.getUTCDate()).padStart(2,"0")}`;
-}
-
-/* ─── OFFER LETTER RESOLVER (3-tier hierarchy) ───────────────────────── */
-// Tier 1: offerLetters[preferredIdx].country
-// Tier 2: offerLetters[0].country (if no preference but data exists)
-// Tier 3: standalone targetCountry (pre-application, no offer yet)
-function resolveOffer(profile, preferredIdx = 0) {
-  const offers = profile?.offerLetters;
-  if (Array.isArray(offers) && offers.length > 0) {
-    const idx = (preferredIdx >= 0 && preferredIdx < offers.length) ? preferredIdx : 0;
-    const o = offers[idx];
-    return {
-      country:      o.country      && o.country      !== "Not found" ? o.country      : null,
-      university:   o.university   && o.university   !== "Not found" ? o.university   : null,
-      status:       o.status       || null,
-      program:      o.program      && o.program      !== "Not found" ? o.program      : null,
-      intakeSeason: o.intakeSeason && o.intakeSeason !== "Not found" ? o.intakeSeason : null,
-      conditions:   o.conditions   || null,
-      hasOffer: true,
-      idx,
-    };
-  }
-  const fallback = profile?.targetCountry && profile.targetCountry !== "Not found" ? profile.targetCountry : null;
-  return { country: fallback, university: null, status: null, program: null, intakeSeason: null, conditions: null, hasOffer: false, idx: 0 };
-}
-
-function migrateOfferLetter(profile) {
-  if (!profile) return profile;
-  // ── Migrate old flat offerLetter string → new offerLetters array ──
-  if (!Array.isArray(profile.offerLetters)) {
-    const old = profile.offerLetter;
-    if (!old || old === "Not found" || old === "") {
-      const { offerLetter: _drop, ...rest } = profile;
-      profile = { ...rest, offerLetters: [] };
-    } else {
-      const m = old.match(/^(Full|Conditional)\s*[—\-–]\s*(.+?)(?:,\s*(.+))?$/i);
-      const { offerLetter: _drop, ...rest } = profile;
-      if (m) {
-        profile = { ...rest, offerLetters: [{ status: m[1], university: (m[2]||"").trim(), country: (m[3]||profile.targetCountry||"Not found").trim(), program: "Not found", intakeSeason: "Not found", conditions: "" }] };
-      } else {
-        profile = { ...rest, offerLetters: [{ status: "Legacy", university: old, country: profile.targetCountry||"Not found", program: "Not found", intakeSeason: "Not found", conditions: "" }] };
-      }
-    }
-  }
-  // ── Migrate legacy flat ieltsScore/toeflScore/pteScore → englishTests array ──
-  if (!Array.isArray(profile.englishTests) || profile.englishTests.length === 0) {
-    const tests = [];
-    if (profile.ieltsScore && profile.ieltsScore !== "Not found" && profile.ieltsScore !== "") {
-      tests.push({ type: "IELTS", overallScore: profile.ieltsScore, testDate: "", urn: "", subScores: { listening: "", reading: "", writing: "", speaking: "" } });
-    }
-    if (profile.toeflScore && profile.toeflScore !== "Not found" && profile.toeflScore !== "") {
-      tests.push({ type: "TOEFL iBT", overallScore: profile.toeflScore, testDate: "", urn: "", subScores: { listening: "", reading: "", writing: "", speaking: "" } });
-    }
-    if (profile.pteScore && profile.pteScore !== "Not found" && profile.pteScore !== "") {
-      tests.push({ type: "PTE Academic", overallScore: profile.pteScore, testDate: "", urn: "", subScores: { listening: "", reading: "", writing: "", speaking: "" } });
-    }
-    if (tests.length > 0) profile = { ...profile, englishTests: tests };
-    else profile = { ...profile, englishTests: [] };
-  }
-  return profile;
-}
-
-/* ─── CURRENCY PARSER ──────────────────────────────────────────────── */
-// Returns { amount: number|null, currency: string|null }
-// Handles: £12,000  GBP 12,000  PKR 5,495,000  5.000.000 EUR  $18,000  Rs 500,000
-function parseCurrencyAmount(str) {
-  if (!str || str === "Not found" || str.trim() === "") return { amount: null, currency: null };
-  const s = str.trim();
-
-  // Detect currency — symbol wins over ISO code if both present
-  const SYMBOL_MAP = [
-    { re: /£/,                  iso: "GBP" },
-    { re: /€/,                  iso: "EUR" },
-    { re: /A\$|AUD/i,          iso: "AUD" },
-    { re: /C\$|CAD/i,          iso: "CAD" },
-    { re: /NZ\$|NZD/i,         iso: "NZD" },
-    { re: /\$\s*(?!CAD|AUD)/i, iso: "USD" },
-    { re: /¥|CNY|JPY/i,        iso: "CNY" },
-    { re: /PKR|Rs\.?\s|₨/i,    iso: "PKR" },
-    { re: /INR|₹/i,            iso: "INR" },
-    { re: /EUR/i,              iso: "EUR" },
-    { re: /GBP/i,              iso: "GBP" },
-    { re: /USD/i,              iso: "USD" },
-  ];
-  let currency = null;
-  for (const { re, iso } of SYMBOL_MAP) {
-    if (re.test(s)) { currency = iso; break; }
-  }
-
-  // Strip everything except digits, commas, dots
-  const numStr = s.replace(/[^0-9.,]/g, "").trim();
-  if (!numStr) return { amount: null, currency };
-
-  // Distinguish European notation (1.234.567,00) from UK/US (1,234,567.00)
-  // Rule: if the string has both , and . — the last one is the decimal separator
-  let normalised = numStr;
-  const lastDot   = numStr.lastIndexOf(".");
-  const lastComma = numStr.lastIndexOf(",");
-  if (lastDot > -1 && lastComma > -1) {
-    if (lastComma > lastDot) {
-      // European: 1.234.567,00 → remove dots, replace comma with dot
-      normalised = numStr.replace(/\./g, "").replace(",", ".");
-    } else {
-      // UK/US: 1,234,567.00 → remove commas
-      normalised = numStr.replace(/,/g, "");
-    }
-  } else if (lastComma > -1 && lastDot === -1) {
-    // Comma only — treat as thousands separator if >3 digits after it, else decimal
-    const afterComma = numStr.slice(lastComma + 1);
-    normalised = afterComma.length === 3 ? numStr.replace(/,/g, "") : numStr.replace(",", ".");
-  } else if (lastDot > -1 && lastComma === -1) {
-    // Dot only — treat as thousands separator if >3 digits after it, else decimal
-    const afterDot = numStr.slice(lastDot + 1);
-    normalised = afterDot.length === 3 && numStr.replace(/[^.]/g,"").length > 1
-      ? numStr.replace(/\./g, "") : numStr;
-  }
-
-  const amount = parseFloat(normalised);
-  return { amount: isNaN(amount) ? null : amount, currency };
-}
-
-/* ─── COUNTRY → CURRENCY MAP ────────────────────────────────────── */
-const COUNTRY_CURRENCY = {
-  "United Kingdom": "GBP",
-  "Finland":        "EUR",
-  "Germany":        "EUR",
-  "Canada":         "CAD",
-  "Australia":      "AUD",
-  "United States":  "USD",
-  "Netherlands":    "EUR",
-  "Sweden":         "SEK",
-  "Ireland":        "EUR",
-  "New Zealand":    "NZD",
-};
-
-/* ─── AUTO-POPULATE FUNDS REQUIRED FROM UNIVERSITY DATA ───────────────── */
-// Returns { value, amount, currency, label, source:"builtin"|"csv" } or null
-function lookupFundsRequired(profile, preferredIdx, requirementsData) {
-  if (!requirementsData) return null;
-  const resolved = resolveOffer(profile, preferredIdx);
-  const offerCountry = resolved.country;
-  const offerUni     = resolved.university;
-  const offerProg    = resolved.program;
-  if (!offerCountry && !offerUni) return null;
-
-  // Fuzzy country match
-  const countryKey = Object.keys(requirementsData).find(k =>
-    k === offerCountry ||
-    (offerCountry && (
-      k.toLowerCase().includes(offerCountry.toLowerCase()) ||
-      offerCountry.toLowerCase().includes(k.toLowerCase())
-    ))
-  );
-  if (!countryKey) return null;
-  const countryData = requirementsData[countryKey];
-  if (!countryData?.universities) return null;
-
-  const currency = COUNTRY_CURRENCY[countryKey] || null;
-  const source   = Object.keys(UNIVERSITY_DATA).includes(countryKey) ? "builtin" : "csv";
-
-  // Fuzzy university match
-  const uniKey = Object.keys(countryData.universities).find(k =>
-    k === offerUni ||
-    (offerUni && (
-      k.toLowerCase().includes(offerUni.toLowerCase()) ||
-      offerUni.toLowerCase().includes(k.toLowerCase())
-    ))
-  );
-  if (!uniKey) return null;
-  const uniData = countryData.universities[uniKey];
-  if (!uniData?.programs?.length) return null;
-
-  // Fuzzy programme match — fall back to first programme
-  const prog = (offerProg && offerProg !== "Not found")
-    ? (uniData.programs.find(p =>
-        p.name === offerProg ||
-        p.name.toLowerCase().includes(offerProg.toLowerCase()) ||
-        offerProg.toLowerCase().includes(p.name.toLowerCase())
-      ) || uniData.programs[0])
-    : uniData.programs[0];
-
-  if (!prog?.financial) return null;
-
-  const value = currency
-    ? `${currency} ${prog.financial.toLocaleString()}`
-    : `${prog.financial.toLocaleString()}`;
-  const label = `${uniKey} · ${prog.name}`;
-
-  return { value, amount: prog.financial, currency, label, source };
-}
-const UNIVERSITY_DATA = {
-  "United Kingdom": {
-    flag:"🇬🇧", visaType:"UK Student Visa (Tier 4)",
-    visaChecklist:[
-      {item:"Valid Passport",note:"Must be valid for duration of course + 6 months",required:true},
-      {item:"CAS Number",note:"Confirmation of Acceptance for Studies from university",required:true},
-      {item:"Financial Proof",note:"£1,334/month in London or £1,023/month outside London",required:true},
-      {item:"Academic Transcripts",note:"All previous degrees/qualifications",required:true},
-      {item:"English Language Test",note:"IELTS UKVI, TOEFL or equivalent",required:true},
-      {item:"Tuberculosis Test Result",note:"Required for applicants from certain countries (Pakistan, India etc.)",required:true},
-      {item:"Bank Statements",note:"Last 28 days, showing required funds maintained",required:true},
-      {item:"Passport Photos",note:"2 recent passport-sized photos",required:true},
-      {item:"Immigration Health Surcharge",note:"£776/year (student), paid online before applying",required:true},
-      {item:"Unconditional Offer Letter",note:"From a UKVI-licensed sponsor university",required:true},
-    ],
-    universities:{
-      "University of Sheffield":{ranking:"QS #113",programs:[
-        {name:"MA English Literature",level:"Postgraduate",ielts:6.5,gpa:3.0,financial:18000,duration:"1 year",tuition:22000},
-        {name:"MSc Data Science",level:"Postgraduate",ielts:6.5,gpa:3.3,financial:20000,duration:"1 year",tuition:26000},
-        {name:"MBA Business Administration",level:"Postgraduate",ielts:6.5,gpa:3.0,financial:25000,duration:"1 year",tuition:32000,note:"2 years work experience recommended"},
-        {name:"BSc Computer Science",level:"Undergraduate",ielts:6.0,gpa:2.8,financial:18000,duration:"3 years",tuition:24000},
-      ]},
-      "University of Leeds":{ranking:"QS #86",programs:[
-        {name:"MA Linguistics",level:"Postgraduate",ielts:6.5,gpa:3.0,financial:18000,duration:"1 year",tuition:21000},
-        {name:"MSc Computer Science",level:"Postgraduate",ielts:6.5,gpa:3.3,financial:20000,duration:"1 year",tuition:27000},
-        {name:"MSc Finance",level:"Postgraduate",ielts:6.5,gpa:3.2,financial:22000,duration:"1 year",tuition:29000},
-        {name:"BA International Relations",level:"Undergraduate",ielts:6.0,gpa:2.8,financial:18000,duration:"3 years",tuition:22000},
-      ]},
-      "University of Manchester":{ranking:"QS #32",programs:[
-        {name:"MA Education",level:"Postgraduate",ielts:6.5,gpa:3.0,financial:20000,duration:"1 year",tuition:23000},
-        {name:"MSc Artificial Intelligence",level:"Postgraduate",ielts:7.0,gpa:3.5,financial:22000,duration:"1 year",tuition:31000},
-        {name:"MSc Management",level:"Postgraduate",ielts:6.5,gpa:3.2,financial:22000,duration:"1 year",tuition:28000},
-        {name:"BSc Biomedical Sciences",level:"Undergraduate",ielts:6.5,gpa:3.0,financial:20000,duration:"3 years",tuition:26000},
-      ]},
-      "Coventry University":{ranking:"QS #801-1000",programs:[
-        {name:"BA Business Management",level:"Undergraduate",ielts:6.0,gpa:2.5,financial:15000,duration:"3 years",tuition:16500},
-        {name:"MSc Engineering Management",level:"Postgraduate",ielts:6.5,gpa:2.8,financial:18000,duration:"1 year",tuition:18500},
-        {name:"MSc International Business",level:"Postgraduate",ielts:6.5,gpa:2.8,financial:18000,duration:"1 year",tuition:17500},
-      ]},
-      "Anglia Ruskin University":{ranking:"QS #601-650",programs:[
-        {name:"MSc Project Management",level:"Postgraduate",ielts:6.5,gpa:2.8,financial:16000,duration:"1 year",tuition:15000},
-        {name:"BSc Nursing",level:"Undergraduate",ielts:7.0,gpa:3.0,financial:15000,duration:"3 years",tuition:14500},
-        {name:"MA Creative Writing",level:"Postgraduate",ielts:6.0,gpa:2.5,financial:15000,duration:"1 year",tuition:14000},
-      ]},
-    }
-  },
-  
-   "Canada": {
-    flag: "🇨🇦", visaType: "Canada Study Permit",
-    visaChecklist: [
-      { item: "Letter of Acceptance (LOA)", note: "From a Designated Learning Institution (DLI)", required: true },
-      { item: "Provincial Attestation Letter (PAL)", note: "Required for most undergraduate/college students (new 2024 rule)", required: true },
-      { item: "GIC (Guaranteed Investment Certificate)", note: "$20,635 CAD minimum for living expenses (increased Jan 2024)", required: true },
-      { item: "Valid Passport", note: "Should be valid for the duration of studies", required: true },
-      { item: "Medicals & Biometrics", note: "Upfront medical exam recommended for faster processing", required: true },
-      { item: "Statement of Purpose (SOP)", note: "Explaining why you chose this program and Canada", required: true },
-      { item: "CAQ", note: "Only required for students heading to Quebec", required: false }
-    ],
-    universities: {
-      "University of Toronto": { ranking: "QS #21", programs: [
-        { name: "MSc Computer Science", level: "Postgraduate", ielts: 7.0, gpa: 3.5, financial: 35000, duration: "2 years", tuition: 62000 },
-        { name: "Master of Management Analytics", level: "Postgraduate", ielts: 7.0, gpa: 3.3, financial: 35000, duration: "1 year", tuition: 68000 }
-      ]},
-      "University of British Columbia": { ranking: "QS #38", programs: [
-        { name: "BSc Applied Science (Engineering)", level: "Undergraduate", ielts: 6.5, gpa: 3.2, financial: 30000, duration: "4 years", tuition: 54000 },
-        { name: "MBA", level: "Postgraduate", ielts: 7.0, gpa: 3.0, financial: 35000, duration: "16 months", tuition: 60000 }
-      ]},
-      "McGill University": { ranking: "QS #29", programs: [
-        { name: "M.Eng Electrical Engineering", level: "Postgraduate", ielts: 6.5, gpa: 3.3, financial: 30000, duration: "2 years", tuition: 32000 },
-        { name: "B.Com Finance", level: "Undergraduate", ielts: 7.0, gpa: 3.5, financial: 30000, duration: "3-4 years", tuition: 59000 }
-      ]},
-      "University of Waterloo": { ranking: "QS #115", programs: [
-        { name: "MMath Data Science", level: "Postgraduate", ielts: 7.5, gpa: 3.5, financial: 30000, duration: "2 years", tuition: 42000 },
-        { name: "BASc Software Engineering", level: "Undergraduate", ielts: 6.5, gpa: 3.5, financial: 30000, duration: "5 years", tuition: 65000 }
-      ]},
-      "Seneca College": { ranking: "Top College", programs: [
-        { name: "Post-Grad Certificate Cybersecurity", level: "Postgraduate", ielts: 6.5, gpa: 2.5, financial: 25000, duration: "1 year", tuition: 18000 },
-        { name: "Diploma Computer Programming", level: "Undergraduate", ielts: 6.0, gpa: 2.5, financial: 25000, duration: "2 years", tuition: 17500 }
-      ]}
-    }
-  },
-  
-  "Sweden": {
-    flag: "🇸🇪", visaType: "Sweden Residence Permit (Studies)",
-    visaChecklist: [
-      { item: "Acceptance Letter", note: "Notification of Selection Results from Universityadmissions.se", required: true },
-      { item: "Financial Proof", note: "SEK 10,314/month for 10 months per year", required: true },
-      { item: "Comprehensive Health Insurance", note: "Required if program is shorter than 1 year", required: true },
-      { item: "Tuition Fee Receipt", note: "Proof of first installment payment", required: true },
-      { item: "Passport", note: "Valid for at least 6 months", required: true }
-    ],
-    universities: {
-      "KTH Royal Institute of Technology": { ranking: "QS #73", programs: [
-        { name: "MSc Machine Learning", level: "Postgraduate", ielts: 6.5, gpa: 3.3, financial: 12000, duration: "2 years", tuition: 16000 },
-        { name: "MSc Sustainable Energy Engineering", level: "Postgraduate", ielts: 6.5, gpa: 3.0, financial: 12000, duration: "2 years", tuition: 15500 }
-      ]},
-      "Lund University": { ranking: "QS #80", programs: [
-        { name: "MSc Finance", level: "Postgraduate", ielts: 6.5, gpa: 3.2, financial: 12000, duration: "1 year", tuition: 14000 },
-        { name: "MSc International Marketing", level: "Postgraduate", ielts: 6.5, gpa: 3.0, financial: 12000, duration: "1 year", tuition: 13000 }
-      ]},
-      "Uppsala University": { ranking: "QS #103", programs: [
-        { name: "MSc Bioinformatics", level: "Postgraduate", ielts: 6.5, gpa: 3.3, financial: 12000, duration: "2 years", tuition: 14500 },
-        { name: "MA Digital Media", level: "Postgraduate", ielts: 7.0, gpa: 3.0, financial: 12000, duration: "2 years", tuition: 11000 }
-      ]},
-      "Chalmers University": { ranking: "QS #129", programs: [
-        { name: "MSc Automotive Engineering", level: "Postgraduate", ielts: 6.5, gpa: 3.0, financial: 12000, duration: "2 years", tuition: 15500 },
-        { name: "MSc Interaction Design", level: "Postgraduate", ielts: 6.5, gpa: 3.0, financial: 12000, duration: "2 years", tuition: 15500 }
-      ]},
-      "Stockholm University": { ranking: "QS #128", programs: [
-        { name: "MSc Environmental Science", level: "Postgraduate", ielts: 6.5, gpa: 3.3, financial: 12000, duration: "2 years", tuition: 14000 },
-        { name: "Master of Laws (LLM)", level: "Postgraduate", ielts: 7.0, gpa: 3.5, financial: 12000, duration: "1 year", tuition: 10000 }
-      ]}
-    }
-  },
-  
-  "USA": {
-    flag: "🇺🇸", visaType: "F-1 Student Visa",
-    visaChecklist: [
-      { item: "I-20 Form", note: "Certificate of Eligibility from University", required: true },
-      { item: "SEVIS I-901 Fee Receipt", note: "$350 fee paid before interview", required: true },
-      { item: "DS-160 Confirmation", note: "Online non-immigrant visa application", required: true },
-      { item: "Financial Proof", note: "Evidence of liquid funds for 1st year (I-20 amount)", required: true },
-      { item: "Visa Interview Appointment", note: "Held at nearest US Embassy/Consulate", required: true }
-    ],
-    universities: {
-      "MIT": { ranking: "QS #1", programs: [
-        { name: "MSc EECS", level: "Postgraduate", ielts: 7.0, gpa: 3.8, financial: 45000, duration: "2 years", tuition: 59000 },
-        { name: "MBA (Sloan)", level: "Postgraduate", ielts: 7.5, gpa: 3.6, financial: 60000, duration: "2 years", tuition: 84000 }
-      ]},
-      "Stanford University": { ranking: "QS #5", programs: [
-        { name: "MS Statistics", level: "Postgraduate", ielts: 7.0, gpa: 3.7, financial: 50000, duration: "2 years", tuition: 52000 },
-        { name: "MS Management Science", level: "Postgraduate", ielts: 7.0, gpa: 3.5, financial: 50000, duration: "1 year", tuition: 62000 }
-      ]},
-      "Georgia Institute of Technology": { ranking: "QS #114", programs: [
-        { name: "MS Computer Science", level: "Postgraduate", ielts: 7.0, gpa: 3.5, financial: 30000, duration: "1.5 years", tuition: 31000 },
-        { name: "BS Aerospace Engineering", level: "Undergraduate", ielts: 6.5, gpa: 3.3, financial: 30000, duration: "4 years", tuition: 33000 }
-      ]},
-      "University of California, Berkeley": { ranking: "QS #12", programs: [
-        { name: "Master of Engineering (MEng)", level: "Postgraduate", ielts: 7.0, gpa: 3.5, financial: 45000, duration: "1 year", tuition: 55000 },
-        { name: "LLM", level: "Postgraduate", ielts: 7.0, gpa: 3.5, financial: 45000, duration: "1 year", tuition: 72000 }
-      ]},
-      "Arizona State University": { ranking: "QS #200", programs: [
-        { name: "MSc Business Analytics", level: "Postgraduate", ielts: 6.5, gpa: 3.0, financial: 25000, duration: "1 year", tuition: 54000 },
-        { name: "BSc Psychology", level: "Undergraduate", ielts: 6.0, gpa: 2.8, financial: 25000, duration: "4 years", tuition: 33000 }
-      ]}
-    }
-  },
-  
-  "Italy": {
-    flag: "🇮🇹", visaType: "Italy National Study Visa (D-Type)",
-    visaChecklist: [
-      { item: "Universitaly Pre-enrollment", note: "Official summary from the portal", required: true },
-      { item: "Admission Letter", note: "Official acceptance from university", required: true },
-      { item: "Financial Proof", note: "€6,079 minimum per year", required: true },
-      { item: "Health Insurance", note: "Minimum €30,000 coverage", required: true },
-      { item: "Proof of Accommodation", note: "Rental agreement or declaration of hospitality", required: true }
-    ],
-    universities: {
-      "Politecnico di Milano": { ranking: "QS #111", programs: [
-        { name: "MSc Architecture", level: "Postgraduate", ielts: 6.0, gpa: 3.0, financial: 6000, duration: "2 years", tuition: 3900 },
-        { name: "MSc Management Engineering", level: "Postgraduate", ielts: 6.0, gpa: 3.0, financial: 6000, duration: "2 years", tuition: 3900 }
-      ]},
-      "University of Bologna": { ranking: "QS #133", programs: [
-        { name: "MA International Relations", level: "Postgraduate", ielts: 6.5, gpa: 3.0, financial: 6000, duration: "2 years", tuition: 3200 },
-        { name: "BSc Business & Economics", level: "Undergraduate", ielts: 6.0, gpa: 2.8, financial: 6000, duration: "3 years", tuition: 2500 }
-      ]},
-      "Sapienza University of Rome": { ranking: "QS #132", programs: [
-        { name: "MSc AI & Robotics", level: "Postgraduate", ielts: 6.5, gpa: 3.3, financial: 6000, duration: "2 years", tuition: 2800 },
-        { name: "MSc Data Science", level: "Postgraduate", ielts: 6.5, gpa: 3.3, financial: 6000, duration: "2 years", tuition: 2800 }
-      ]},
-      "University of Padova": { ranking: "QS #219", programs: [
-        { name: "MSc Psychological Science", level: "Postgraduate", ielts: 6.0, gpa: 3.0, financial: 6000, duration: "2 years", tuition: 2600 },
-        { name: "MSc Biotechnologies", level: "Postgraduate", ielts: 6.0, gpa: 3.0, financial: 6000, duration: "2 years", tuition: 2600 }
-      ]},
-      "Tor Vergata University": { ranking: "QS #481", programs: [
-        { name: "MSc Finance & Banking", level: "Postgraduate", ielts: 6.0, gpa: 2.8, financial: 6000, duration: "2 years", tuition: 2400 },
-        { name: "MSc Pharmacy", level: "Postgraduate", ielts: 6.5, gpa: 3.0, financial: 6000, duration: "5 years", tuition: 4000 }
-      ]}
-    }
-  },
-  
-  "Germany": {
-    flag: "🇩🇪", visaType: "German National Student Visa",
-    visaChecklist: [
-      { item: "Admission Letter", note: "Zulassungsbescheid from university", required: true },
-      { item: "Blocked Account (Sperrkonto)", note: "€11,904 minimum (for 2025/26 requirements)", required: true },
-      { item: "Health Insurance", note: "Public insurance (TK/AOK) or specialized private", required: true },
-      { item: "English/German Proof", note: "IELTS/TOEFL or TestDaF/Goethe", required: true },
-      { item: "APS Certificate", note: "Required for India, China, Vietnam applicants", required: false }
-    ],
-    universities: {
-      "TU Munich (TUM)": { ranking: "QS #28", programs: [
-        { name: "MSc Informatics", level: "Postgraduate", ielts: 6.5, gpa: 3.5, financial: 12000, duration: "2 years", tuition: 6000, note: "New tuition fee for non-EU students (2024)" },
-        { name: "MSc Management", level: "Postgraduate", ielts: 7.0, gpa: 3.3, financial: 12000, duration: "2 years", tuition: 6000 }
-      ]},
-      "LMU Munich": { ranking: "QS #59", programs: [
-        { name: "MSc Data Science", level: "Postgraduate", ielts: 7.0, gpa: 3.5, financial: 12000, duration: "2 years", tuition: 0, note: "Only semester contribution (~€150)" },
-        { name: "MA Economics", level: "Postgraduate", ielts: 6.5, gpa: 3.2, financial: 12000, duration: "2 years", tuition: 0 }
-      ]},
-      "Heidelberg University": { ranking: "QS #84", programs: [
-        { name: "MSc Biomedical Engineering", level: "Postgraduate", ielts: 6.5, gpa: 3.3, financial: 12000, duration: "2 years", tuition: 3000 },
-        { name: "MSc Scientific Computing", level: "Postgraduate", ielts: 6.5, gpa: 3.3, financial: 12000, duration: "2 years", tuition: 3000 }
-      ]},
-      "RWTH Aachen": { ranking: "QS #99", programs: [
-        { name: "MSc Mechanical Engineering", level: "Postgraduate", ielts: 6.5, gpa: 3.0, financial: 12000, duration: "2 years", tuition: 0 },
-        { name: "MSc Software Systems Engineering", level: "Postgraduate", ielts: 6.5, gpa: 3.3, financial: 12000, duration: "2 years", tuition: 0 }
-      ]},
-      "Humboldt University Berlin": { ranking: "QS #126", programs: [
-        { name: "MA Global History", level: "Postgraduate", ielts: 7.0, gpa: 3.2, financial: 12000, duration: "2 years", tuition: 0 },
-        { name: "MSc Agricultural Economics", level: "Postgraduate", ielts: 6.0, gpa: 2.8, financial: 12000, duration: "2 years", tuition: 0 }
-      ]}
-    }
-  },
-  
-  "China": {
-    flag: "🇨🇳", visaType: "China X1 Student Visa",
-    visaChecklist: [
-      { item: "JW201 or JW202 Form", note: "Visa Application for Study in China form", required: true },
-      { item: "Admission Notice", note: "Official letter from Chinese university", required: true },
-      { item: "Physical Exam Record", note: "Foreigner Physical Examination Form", required: true },
-      { item: "Financial Proof", note: "Usually $2,500-$5,000 in bank", required: true },
-      { item: "Criminal Record Clearance", note: "Notarized non-criminal record", required: true }
-    ],
-    universities: {
-      "Tsinghua University": { ranking: "QS #20", programs: [
-        { name: "Master of Global Management", level: "Postgraduate", ielts: 7.0, gpa: 3.5, financial: 8000, duration: "2 years", tuition: 5000 },
-        { name: "MSc Mechanical Engineering", level: "Postgraduate", ielts: 6.5, gpa: 3.3, financial: 8000, duration: "2 years", tuition: 4500 }
-      ]},
-      "Peking University": { ranking: "QS #14", programs: [
-        { name: "Master in Chinese Studies", level: "Postgraduate", ielts: 7.0, gpa: 3.3, financial: 8000, duration: "2 years", tuition: 4000 },
-        { name: "MSc Finance", level: "Postgraduate", ielts: 7.0, gpa: 3.5, financial: 8000, duration: "2 years", tuition: 15000 }
-      ]},
-      "Fudan University": { ranking: "QS #39", programs: [
-        { name: "MBBS (Medicine)", level: "Undergraduate", ielts: 6.5, gpa: 3.3, financial: 10000, duration: "6 years", tuition: 11000 },
-        { name: "MSc International Business", level: "Postgraduate", ielts: 6.5, gpa: 3.0, financial: 8000, duration: "2 years", tuition: 6000 }
-      ]},
-      "Zhejiang University": { ranking: "QS #44", programs: [
-        { name: "MSc Engineering (Civil)", level: "Postgraduate", ielts: 6.0, gpa: 3.0, financial: 7000, duration: "2 years", tuition: 4500 },
-        { name: "BSc Computer Science", level: "Undergraduate", ielts: 6.0, gpa: 3.0, financial: 7000, duration: "4 years", tuition: 3500 }
-      ]},
-      "Shanghai Jiao Tong": { ranking: "QS #45", programs: [
-        { name: "MBA (Antai)", level: "Postgraduate", ielts: 6.5, gpa: 3.0, financial: 10000, duration: "2 years", tuition: 25000 },
-        { name: "MSc Naval Architecture", level: "Postgraduate", ielts: 6.5, gpa: 3.0, financial: 8000, duration: "2 years", tuition: 4500 }
-      ]}
-    }
-  },
-  
-  "Australia": {
-    flag: "🇦🇺", visaType: "Australia Student Visa (Subclass 500)",
-    visaChecklist: [
-      { item: "Confirmation of Enrolment (CoE)", note: "Issued after tuition deposit", required: true },
-      { item: "OSHC Insurance", note: "Overseas Student Health Cover", required: true },
-      { item: "Genuine Student (GS) Requirement", note: "Replaces GTE; statement of intent", required: true },
-      { item: "Financial Proof", note: "AUD 29,710/year living costs (Updated May 2024)", required: true },
-      { item: "English Test Result", note: "IELTS 6.0+ or PTE 50+ (higher for some courses)", required: true }
-    ],
-    universities: {
-      "University of Melbourne": { ranking: "QS #13", programs: [
-        { name: "Master of Information Technology", level: "Postgraduate", ielts: 6.5, gpa: 3.3, financial: 30000, duration: "2 years", tuition: 52000 },
-        { name: "Master of Data Science", level: "Postgraduate", ielts: 6.5, gpa: 3.5, financial: 30000, duration: "2 years", tuition: 54000 }
-      ]},
-      "University of Sydney": { ranking: "QS #18", programs: [
-        { name: "Master of Commerce", level: "Postgraduate", ielts: 7.0, gpa: 3.0, financial: 30000, duration: "1.5 years", tuition: 55000 },
-        { name: "Bachelor of Engineering", level: "Undergraduate", ielts: 6.5, gpa: 3.2, financial: 30000, duration: "4 years", tuition: 53000 }
-      ]},
-      "UNSW Sydney": { ranking: "QS #19", programs: [
-        { name: "MSc Artificial Intelligence", level: "Postgraduate", ielts: 6.5, gpa: 3.3, financial: 30000, duration: "2 years", tuition: 51000 },
-        { name: "MSc Renewable Energy Engineering", level: "Postgraduate", ielts: 6.5, gpa: 3.0, financial: 30000, duration: "2 years", tuition: 51000 }
-      ]},
-      "Australian National University": { ranking: "QS #30", programs: [
-        { name: "Master of International Relations", level: "Postgraduate", ielts: 7.0, gpa: 3.5, financial: 30000, duration: "2 years", tuition: 48000 },
-        { name: "MSc Environment", level: "Postgraduate", ielts: 6.5, gpa: 3.2, financial: 30000, duration: "2 years", tuition: 49000 }
-      ]},
-      "Monash University": { ranking: "QS #37", programs: [
-        { name: "Master of Cybersecurity", level: "Postgraduate", ielts: 6.5, gpa: 3.0, financial: 30000, duration: "2 years", tuition: 49000 },
-        { name: "Bachelor of Nursing", level: "Undergraduate", ielts: 7.0, gpa: 3.0, financial: 30000, duration: "3 years", tuition: 43000 }
-      ]}
-    }
-  },
-  
-  "Finland":{
-    flag:"🇫🇮", visaType:"Finland Student Residence Permit",
-    visaChecklist:[
-      {item:"Valid Passport",note:"Valid for entire study period + return",required:true},
-      {item:"University Acceptance Letter",note:"Official admission letter from Finnish university",required:true},
-      {item:"Proof of Financial Means",note:"€6,720/year minimum (€560/month)",required:true},
-      {item:"Proof of Tuition Fee Payment",note:"Receipt of first year tuition payment",required:true},
-      {item:"Health Insurance",note:"Valid for Finland, minimum €30,000 coverage",required:true},
-      {item:"Academic Transcripts",note:"All previous degrees with certified translations",required:true},
-      {item:"English Language Test",note:"IELTS 6.0+ or TOEFL 79+ for English-taught programmes",required:true},
-      {item:"Passport Photos",note:"2 recent passport-sized photos (biometric)",required:true},
-      {item:"Completed Application Form",note:"Online via EnterFinland.fi portal",required:true},
-      {item:"Proof of Accommodation",note:"Student housing confirmation or rental agreement",required:false},
-    ],
-    universities:{
-      "University of Helsinki":{ranking:"QS #107",programs:[
-        {name:"MSc Computer Science",level:"Postgraduate",ielts:6.5,gpa:3.5,financial:10000,duration:"2 years",tuition:15000,note:"Acceptance rate 17% — highly competitive"},
-        {name:"MSc Data Science",level:"Postgraduate",ielts:6.5,gpa:3.5,financial:10000,duration:"2 years",tuition:15000},
-        {name:"MA Linguistics",level:"Postgraduate",ielts:6.5,gpa:3.3,financial:9000,duration:"2 years",tuition:13000},
-        {name:"MSc Ecology & Evolutionary Biology",level:"Postgraduate",ielts:6.5,gpa:3.3,financial:9000,duration:"2 years",tuition:13000},
-      ]},
-      "Aalto University":{ranking:"QS #109",programs:[
-        {name:"MSc Engineering (Mechanical)",level:"Postgraduate",ielts:6.5,gpa:3.0,financial:14000,duration:"2 years",tuition:15000},
-        {name:"MSc Business Administration",level:"Postgraduate",ielts:6.5,gpa:3.0,financial:14000,duration:"2 years",tuition:15000},
-        {name:"MSc Arts & Design",level:"Postgraduate",ielts:6.5,gpa:3.0,financial:12000,duration:"2 years",tuition:12000},
-        {name:"MSc Information Networks",level:"Postgraduate",ielts:6.5,gpa:3.3,financial:14000,duration:"2 years",tuition:15000},
-      ]},
-      "Tampere University":{ranking:"QS #351-400",programs:[
-        {name:"MSc Software Engineering",level:"Postgraduate",ielts:6.0,gpa:3.0,financial:10000,duration:"2 years",tuition:12000},
-        {name:"MSc Health Sciences",level:"Postgraduate",ielts:6.0,gpa:3.0,financial:9000,duration:"2 years",tuition:10000},
-        {name:"MSc Biomedical Engineering",level:"Postgraduate",ielts:6.5,gpa:3.2,financial:10000,duration:"2 years",tuition:12000},
-      ]},
-      "University of Turku":{ranking:"QS #401-450",programs:[
-        {name:"MSc Bioinformatics",level:"Postgraduate",ielts:6.5,gpa:3.3,financial:10000,duration:"2 years",tuition:12000},
-        {name:"MA Education",level:"Postgraduate",ielts:6.0,gpa:3.0,financial:8000,duration:"2 years",tuition:10000},
-        {name:"MSc Future Technologies",level:"Postgraduate",ielts:6.0,gpa:3.0,financial:10000,duration:"2 years",tuition:11000},
-      ]},
-      "LUT University":{ranking:"QS #651-700",programs:[
-        {name:"MSc Industrial Engineering",level:"Postgraduate",ielts:6.0,gpa:3.0,financial:10000,duration:"2 years",tuition:10000},
-        {name:"MSc Energy Technology",level:"Postgraduate",ielts:6.0,gpa:3.0,financial:10000,duration:"2 years",tuition:10000},
-        {name:"MSc Business Analytics",level:"Postgraduate",ielts:6.5,gpa:3.0,financial:10000,duration:"2 years",tuition:10000},
-      ]},
-    }
-  }
-};
-
-/* ─── VISA DOC TYPE REQUIREMENTS (per country, for DocPresenceChecker) ───── */
-const VISA_DOC_TYPES = {
-  "United Kingdom":[
-    {item:"Valid Passport",            docType:"passport",       required:true},
-    {item:"Offer Letter / CAS",        docType:"offer_letter",   required:true},
-    {item:"Bank Statement",            docType:"bank_statement", required:true},
-    {item:"Academic Transcripts",      docType:"transcript",     required:true},
-    {item:"English Language Test",     docType:"language_test",  required:true},
-    {item:"Financial / Sponsor Proof", docType:"financial_proof",required:true},
-    {item:"Recommendation Letter",     docType:"recommendation", required:false},
-    {item:"Family Registration Cert",  docType:"family_reg_cert",required:false},
-    {item:"Marriage Registration Cert",docType:"marriage_reg_cert",required:false},
-  ],
-  "Finland":[
-    {item:"Valid Passport",            docType:"passport",       required:true},
-    {item:"Acceptance Letter",         docType:"offer_letter",   required:true},
-    {item:"Bank Statement",            docType:"bank_statement", required:true},
-    {item:"Academic Transcripts",      docType:"transcript",     required:true},
-    {item:"English Language Test",     docType:"language_test",  required:true},
-    {item:"Financial Proof",           docType:"financial_proof",required:true},
-    {item:"Recommendation Letter",     docType:"recommendation", required:false},
-    {item:"Family Registration Cert",  docType:"family_reg_cert",required:false},
-    {item:"Marriage Registration Cert",docType:"marriage_reg_cert",required:false},
-  ],
-};
-const GENERIC_VISA_DOCS = [
-  {item:"Valid Passport",          docType:"passport",       required:true},
-  {item:"Offer / Admission Letter",docType:"offer_letter",   required:true},
-  {item:"Bank Statement",          docType:"bank_statement", required:true},
-  {item:"Academic Transcripts",    docType:"transcript",     required:true},
-  {item:"Language Test Result",    docType:"language_test",  required:true},
-  {item:"Financial Proof",         docType:"financial_proof",required:true},
-  {item:"Recommendation Letter",   docType:"recommendation", required:false},
-  {item:"Family Registration Cert",  docType:"family_reg_cert",  required:false},
-  {item:"Marriage Registration Cert",docType:"marriage_reg_cert", required:false},
-];
-
-/* ─── CSV TEMPLATE (downloadable) ────────────────────────────────── */
-const TEMPLATE_CSV =
-`Country,University,Ranking,Program,Level,Min_IELTS,Min_GPA,Min_Financial,Duration,Tuition,Notes
-United Kingdom,London Metropolitan University,QS #1001+,MSc Information Technology,Postgraduate,6.0,2.5,15000,1 year,14000,Good entry point for lower GPA applicants
-United Kingdom,University of Bedfordshire,QS #1001+,MBA,Postgraduate,6.0,2.5,14000,1 year,13500,Accepts students with gap years
-Germany,Technical University of Munich,QS #37,MSc Computer Science,Postgraduate,7.0,3.5,12000,2 years,0,Tuition-free; proof of living costs required
-Germany,RWTH Aachen University,QS #106,MSc Mechanical Engineering,Postgraduate,6.5,3.3,11000,2 years,0,
-Canada,University of Toronto,QS #25,MSc Computer Science,Postgraduate,7.0,3.7,25000,2 years,30000,Very competitive — acceptance rate ~15%
-Canada,York University,QS #451-500,MBA,Postgraduate,6.5,3.0,20000,2 years,22000,
-Australia,University of Melbourne,QS #33,MSc Data Science,Postgraduate,6.5,3.3,30000,2 years,42000,
-Australia,University of Sydney,QS #18,MSc Cybersecurity,Postgraduate,6.5,3.3,28000,1.5 years,45000,`;
-
-/* ─── CSV PARSER ─────────────────────────────────────────────────── */
-function parseCSV(text) {
-  const lines = text.trim().split(/\r?\n/);
-  if (lines.length < 2) return [];
-  const headers = lines[0].split(",").map(h => h.trim().replace(/^"|"$/g,""));
-  return lines.slice(1).filter(l => l.trim()).map(line => {
-    const vals = []; let cur = "", inQ = false;
-    for (const ch of line) {
-      if (ch === '"') inQ = !inQ;
-      else if (ch === "," && !inQ) { vals.push(cur.trim()); cur = ""; }
-      else cur += ch;
-    }
-    vals.push(cur.trim());
-    return Object.fromEntries(headers.map((h,i) => [h, (vals[i]||"").replace(/^"|"$/g,"").trim()]));
-  });
-}
-function normaliseRow(row) {
-  // Detect format by checking which keys exist, then map to a canonical shape
-  const keys = Object.keys(row);
-  const has = k => keys.some(x => x.toLowerCase().replace(/\s/g,"") === k.toLowerCase().replace(/\s/g,""));
-  // Helper: get value by any of several possible key spellings
-  const get = (...names) => {
-    for (const n of names) {
-      const found = keys.find(k => k.trim().toLowerCase() === n.trim().toLowerCase());
-      if (found && row[found]?.trim()) return row[found].trim();
-    }
-    return "";
-  };
-  // Extract IELTS score from a mixed string like "6.5 IELTS / 58 PTE" or "3.0 GPA / 6.5 IELTS"
-  function extractIELTS(str) {
-    const m = str.match(/(\d+\.?\d*)\s*IELTS/i);
-    return m ? parseFloat(m[1]) : NaN;
-  }
-  // Extract GPA score from a mixed string like "3.5 GPA / 120 DET"
-  function extractGPA(str) {
-    const m = str.match(/(\d+\.?\d*)\s*GPA/i);
-    return m ? parseFloat(m[1]) : NaN;
-  }
-  // Extract numeric amount from strings like "£16500", "$45000 CAD", "€0 Tuition", "$1023/month"
-  function extractNum(str) {
-    const m = str.replace(/[,]/g,"").match(/(\d+\.?\d*)/);
-    return m ? parseFloat(m[1]) : NaN;
-  }
-
-  const admReq = get("Admission Requirements", "Requirements");
-  const country  = get("Country");
-  const uni      = get("University Name", "University");
-  const prog     = get("Courses", "Course", "Program", "Programme");
-  const levelRaw = get("Level");
-  const rankRaw  = get("Ranking");
-  const intakeRaw= get("Intake");
-
-  // IELTS: dedicated column wins, else parse from Admission Requirements
-  let ielts = parseFloat(get("Min_IELTS", "IELTS"));
-  if (isNaN(ielts) && admReq) ielts = extractIELTS(admReq);
-
-  // GPA: dedicated column wins, else parse from Admission Requirements
-  let gpa = parseFloat(get("Min_GPA", "GPA"));
-  if (isNaN(gpa) && admReq) gpa = extractGPA(admReq);
-
-  // Financial: dedicated column or Living Cost
-  let fin = extractNum(get("Min_Financial", "Living Cost", "LivingCost"));
-
-  // Tuition
-  const tuitionRaw = get("Tuition", "Tution Fees", "Tuition Fees", "TuitionFees");
-  let tuition = extractNum(tuitionRaw);
-
-  // Notes: combine Notes + Intake if present
-  const noteParts = [get("Notes"), intakeRaw ? `Intakes: ${intakeRaw}` : ""].filter(Boolean);
-
-  return { country, uni, prog, levelRaw, rankRaw, admReq,
-    ielts: isNaN(ielts) ? 6.0 : ielts,
-    gpa:   isNaN(gpa)   ? 3.0 : gpa,
-    financial: isNaN(fin)      ? 10000 : fin,
-    tuition:   isNaN(tuition) ? 15000 : tuition,
-    duration:  get("Duration") || "1 year",
-    note:      noteParts.join(" | "),
-  };
-}
-function csvToRequirements(rows) {
-  const result = {};
-  for (const row of rows) {
-    const { country, uni, prog, levelRaw, rankRaw, ielts, gpa, financial, tuition, duration, note } = normaliseRow(row);
-    if (!country || !uni || !prog) continue;
-    const meta = getCountryMeta(country);
-    if (!result[country]) result[country] = {
-      flag: meta.flag,
-      visaType: meta.visaType,
-      visaChecklist: UNIVERSITY_DATA[country]?.visaChecklist || [],
-      universities: {}
-    };
-    if (!result[country].universities[uni])
-      result[country].universities[uni] = { ranking: rankRaw || "—", programs: [] };
-    result[country].universities[uni].programs.push({
-      name: prog,
-      level: levelRaw || "Postgraduate",
-      ielts, gpa, financial, duration, tuition, note,
-    });
-  }
-  return result;
-}
-function downloadCSV(text, filename) {
-  const b64     = btoa(unescape(encodeURIComponent(text)));
-  const dataUrl = `data:text/csv;base64,${b64}`;
-  const a       = document.createElement("a");
-  a.href = dataUrl; a.download = filename;
-  document.body.appendChild(a); a.click(); document.body.removeChild(a);
-}
-
-/* ─── MISC HELPERS ───────────────────────────────────────────────── */
-function parseGPA(str) {
-  if (!str || str === "Not found") return null;
-  const m = str.match(/(\d+\.?\d*)/); return m ? parseFloat(m[1]) : null;
-}
-function parseIELTS(str) {
-  if (!str || str === "Not found") return null;
-  const m = str.match(/(\d+\.?\d*)/); return m ? parseFloat(m[1]) : null;
-}
-function parseFinancial(str) {
-  if (!str || str === "Not found") return null;
-  const m = str.replace(/,/g,"").match(/(\d+\.?\d*)/); return m ? parseFloat(m[1]) : null;
-}
-function daysUntilExpiry(dateStr) {
-  if (!dateStr || dateStr === "Not found") return null;
-  const formats = [/(\d{2})\.(\d{2})\.(\d{4})/,/(\d{4})-(\d{2})-(\d{2})/,/(\d{2})\/(\d{2})\/(\d{4})/,/(\d{2})-(\d{2})-(\d{4})/];
-  let date = null;
-  for (const fmt of formats) {
-    const m = dateStr.match(fmt);
-    if (m) { date = fmt === formats[1] ? new Date(`${m[1]}-${m[2]}-${m[3]}`) : new Date(`${m[3]}-${m[2]}-${m[1]}`); break; }
-  }
-  if (!date || isNaN(date)) return null;
-  return Math.floor((date - new Date()) / 86400000);
-}
-function scoreCol(s) { return s >= 70 ? "#059669" : s >= 45 ? "#B45309" : "#DC2626"; }
-function scoreBadge(s) { return s >= 70 ? "b-ok" : s >= 45 ? "b-warn" : "b-err"; }
-function scoreLabel(s) { return s >= 70 ? "Strong" : s >= 45 ? "Moderate" : "Weak"; }
-
-/* ─── DOC TYPES ──────────────────────────────────────────────────── */
-const DOC_TYPES = [
-  // Identity
-  {value:"passport",          label:"Passport / ID",                   Icon:CreditCard,  group:"Identity"},
-  {value:"birth_certificate", label:"Birth Certificate",               Icon:FileText,    group:"Identity"},
-  {value:"domicile",          label:"Domicile Certificate",            Icon:FileText,    group:"Identity"},
-  {value:"marriage_certificate",label:"Marriage Certificate",          Icon:FileText,    group:"Identity"},
-  {value:"marriage_reg_cert", label:"Marriage Registration Cert (MRC)",Icon:FileText,    group:"Identity"},
-  {value:"family_reg_cert",   label:"Family Registration Cert (FRC)",  Icon:Users,       group:"Identity"},
-  {value:"police_clearance",  label:"Police Clearance Certificate",    Icon:ShieldCheck, group:"Identity"},
-  // Academic
-  {value:"transcript",        label:"Academic Transcript",             Icon:BookOpen,    group:"Academic"},
-  {value:"degree_certificate",label:"Degree Certificate",              Icon:GraduationCap,group:"Academic"},
-  {value:"experience_letter", label:"Experience / Employment Letter",  Icon:FileText,    group:"Academic"},
-  {value:"gap_letter",        label:"Gap / Explanation Letter",        Icon:FileText,    group:"Academic"},
-  // Applications
-  {value:"offer_letter",      label:"Offer / Admission Letter",        Icon:GraduationCap,group:"Application"},
-  {value:"pre_cas",           label:"Pre-CAS / CAS Request Letter",    Icon:FileText,    group:"Application"},
-  {value:"cas",               label:"CAS (Confirmation of Acceptance)", Icon:ShieldCheck, group:"Application"},
-  {value:"scholarship_letter",label:"Scholarship / Funding Letter",    Icon:Mail,        group:"Application"},
-  {value:"noc",               label:"No Objection Certificate (NOC)", Icon:FileText,    group:"Application"},
-  // Financial
-  {value:"bank_statement",    label:"Bank Statement",                  Icon:BarChart3,   group:"Financial"},
-  {value:"financial_proof",   label:"Financial / Sponsor Letter",      Icon:DollarSign,  group:"Financial"},
-  {value:"fee_receipt",       label:"Fee / Tuition Payment Receipt",   Icon:DollarSign,  group:"Financial"},
-  // Language
-  {value:"language_test",     label:"Language Test (IELTS/TOEFL/PTE)",Icon:Languages,   group:"Language"},
-  // Visa
-  {value:"ihs_receipt",       label:"IHS Payment Receipt (UK)",        Icon:FileText,    group:"Visa"},
-  {value:"tb_test",           label:"TB Test Result",                  Icon:FileText,    group:"Visa"},
-  {value:"medical_certificate",label:"Medical Certificate",            Icon:FileText,    group:"Visa"},
-  // Supporting
-  {value:"recommendation",    label:"Recommendation Letter",           Icon:Mail,        group:"Supporting"},
-  // Rejections
-  {value:"visa_rejection",    label:"Visa Rejection Letter",           Icon:XCircle,     group:"Rejections"},
-  {value:"admission_rejection",label:"Admission / Deferment Letter",   Icon:XCircle,     group:"Rejections"},
-  {value:"other",             label:"Other Document",                  Icon:File,        group:"Other"},
-];
-const getDT = v => DOC_TYPES.find(d => d.value === v) || DOC_TYPES[DOC_TYPES.length-1];
-
-/* ─── SUB-TYPE DEFINITIONS ───────────────────────────────────────── */
-const TRANSCRIPT_LEVELS = [
-  {value:"",               label:"— select level —"},
-  {value:"Matric",         label:"Matric / SSC / O-Levels"},
-  {value:"Intermediate",   label:"Intermediate / FSc / A-Levels / HSC"},
-  {value:"Bachelors",      label:"Bachelors / BA / BSc / BBA"},
-  {value:"Masters",        label:"Masters / MSc / MBA / MA"},
-  {value:"MPhil",          label:"MPhil"},
-  {value:"PhD",            label:"PhD / Doctorate"},
-  {value:"Diploma",        label:"Diploma / Certificate"},
-  {value:"Other",          label:"Other"},
-];
-// Offer letter sub-type is a free-text university name field — no static list needed
-
-// ── Token estimator ─────────────────────────────────────────────────
-// Estimates Claude input tokens from file metadata BEFORE the API call.
-// Used to: (a) show tier warning in UI, (b) send estimated_tokens to worker.
-// Formula based on Anthropic vision pricing:
-//   PDF/image:  pageCount × 1,800  (vision tokens per page, ~1,750 avg)
-//   Text/DOCX:  charCount / 4      (standard token approximation)
-// PDF page count is approximated from file size if not known: ~50KB/page.
-function estimateTokens(docs) {
-  const SYSTEM_TOKENS = 2500; // MAIN_PROMPT overhead (updated to reflect actual prompt size)
-  let docTokens = 0;
-  for (const doc of docs) {
-    if (doc.tooLarge) continue;
-    const sizeMB = doc.file.size / (1024 * 1024);
-    const type   = doc.file.type;
-    if (type === 'application/pdf') {
-      // Use page-count approach: typical scanned page = 150-250KB.
-      // 200KB/page is validated midpoint. Each page costs ~1,800 tokens (vision path).
-      // This matches real data: Rabia 2.7MB/17 pages = ~163KB/page → ~1800/page.
-      const approxPages = Math.max(1, Math.round(doc.file.size / (200 * 1024)));
-      docTokens += approxPages * 1800;
-    } else if (type.startsWith('image/')) {
-      // Vision path: flat ~1,100 tokens per image.
-      // Validated: 28k actual tokens / ~25 mixed images = ~1,100/image.
-      docTokens += 1100;
-    } else {
-      // Text/DOCX: 1 token ≈ 4 chars
-      docTokens += Math.round(doc.file.size / 4);
-    }
-  }
-  return SYSTEM_TOKENS + docTokens;
-}
-
-// Map token count to credit tier — must match worker.js tokenTier() exactly
-function tokenTierClient(tokens) {
-  if (tokens <= 20000) return 1;
-  if (tokens <= 40000) return 2;
-  // Above 40k: +1 analysis per additional 20k tokens, no hardcap
-  return 2 + Math.ceil((tokens - 40000) / 20000);
-}
-
-// Estimate tokens if all unconverted PDFs were converted to images.
-// Used to decide whether showing the Optimise button is actually worthwhile.
-function estimateTokensIfConverted(docs) {
-  const SYSTEM_TOKENS = 2500;
-  let docTokens = 0;
-  for (const doc of docs) {
-    if (doc.tooLarge) continue;
-    const type = doc.file.type;
-    if (type === 'application/pdf' && !doc._convertedFromPdf) {
-      // Each page becomes one image at ~1,100 tokens
-      const approxPages = Math.max(1, Math.round(doc.file.size / (200 * 1024)));
-      docTokens += approxPages * 1100;
-    } else if (type.startsWith('image/')) {
-      docTokens += 1100;
-    } else {
-      docTokens += Math.round(doc.file.size / 4);
-    }
-  }
-  return SYSTEM_TOKENS + docTokens;
-}
-
-
-function guessType(name) {
-  const n = name.toLowerCase();
-  if (n.includes("passport")||n.includes(" id "))               return "passport";
-  if (n.includes("birth"))                                      return "birth_certificate";
-  if (n.includes("domicile"))                                   return "domicile";
-  if (n.includes("marriage")||n.includes("nikah"))              return "marriage_certificate";
-  if (n.includes("mrc")||n.includes("marriage reg"))            return "marriage_reg_cert";
-  if (n.includes("frc")||n.includes("family reg")||n.includes("family registration")) return "family_reg_cert";
-  if (n.includes("police")||n.includes("pcc")||n.includes("clearance")) return "police_clearance";
-  if (n.includes("transcript")||n.includes("grade")||n.includes("result")) return "transcript";
-  if (n.includes("degree")||n.includes("certificate")&&!n.includes("birth")&&!n.includes("domicile")) return "degree_certificate";
-  if (n.includes("experience")||n.includes("employment")||n.includes("noc")&&!n.includes("_noc")) return "experience_letter";
-  if (n.includes("gap")||n.includes("explanation"))             return "gap_letter";
-  if (n.includes("offer")||n.includes("admission"))             return "offer_letter";
-  if (n.includes("pre-cas")||n.includes("pre_cas")||n.includes("precas")||n.includes("cas request")||n.includes("cas letter")) return "pre_cas";
-  if (n.includes(" cas ")||n.includes("_cas_")||n.includes("-cas-")||n.startsWith("cas")||n.endsWith("cas")||(n.includes("cas")&&n.includes("confirm"))) return "cas";
-  if (n.includes("scholarship")||n.includes("funding"))         return "scholarship_letter";
-  if (n.includes("noc"))                                        return "noc";
-  if (n.includes("bank")||n.includes("statement"))             return "bank_statement";
-  if (n.includes("financial")||n.includes("sponsor")||n.includes("affidavit")) return "financial_proof";
-  if (n.includes("fee")||n.includes("receipt")||n.includes("payment")&&!n.includes("ihs")) return "fee_receipt";
-  if (n.includes("ielts")||n.includes("toefl")||n.includes("pte")||n.includes("language")) return "language_test";
-  if (n.includes("ihs"))                                        return "ihs_receipt";
-  if (n.includes("tb")||n.includes("tuberculosis"))             return "tb_test";
-  if (n.includes("medical")||n.includes("health"))             return "medical_certificate";
-  if (n.includes("recommend")||n.includes("reference"))        return "recommendation";
-  return "other";
-}
 
 /* ─── PREVIEW MODAL ──────────────────────────────────────────────── */
 function PreviewModal({ doc, onClose }) {
@@ -1817,60 +641,6 @@ function CasDocumentsSection({ data, setData }) {
   );
 }
 
-/* ─── MRZ CHECK DIGIT VALIDATOR ─────────────────────────────────── */
-// ICAO Doc 9303 check digit algorithm.
-// The MRZ check digit is computed over a string using a weighted sum
-// of character values (A=10…Z=35, 0-9=face value, <>=0) with
-// repeating weights [7, 3, 1]. The check digit is the result mod 10.
-//
-// For a Pakistani passport the full MRZ line 2 starts with the
-// 9-character passport number followed immediately by its check digit
-// at position 9 (0-indexed). We validate that single check digit.
-// Format enforced upstream: ^[A-Z]{2}[0-9]{7}$  (2 letters + 7 digits)
-
-function mrzCharValue(ch) {
-  if (ch >= "0" && ch <= "9") return parseInt(ch, 10);
-  if (ch >= "A" && ch <= "Z") return ch.charCodeAt(0) - 55; // A=10…Z=35
-  return 0; // < or filler
-}
-
-function mrzComputeCheckDigit(str) {
-  const weights = [7, 3, 1];
-  let total = 0;
-  for (let i = 0; i < str.length; i++) {
-    total += mrzCharValue(str[i]) * weights[i % 3];
-  }
-  return total % 10;
-}
-
-// Returns: "valid" | "invalid" | "format_error" | "no_check_digit"
-// Pakistani MRZ line 2: <PassportNo9chars><CheckDigit1char><DOB6><CDdob><Sex><Expiry6><CDexp><Nationality3><Optional><CDcomp>
-// We only have the passport number from the profile, not the full MRZ line,
-// so we can only validate the passport number's own check digit IF the
-// counsellor or AI has captured it. In practice, the AI extracts only the
-// 9-char number. We therefore validate FORMAT + do a self-check using
-// the last digit of the number as the check digit over the first 8 chars.
-// Pakistani passport numbers: AA1234567 where check digit is digit 9 (index 8).
-// The ICAO check digit for the passport number field covers all 9 chars
-// and is the 10th character on the MRZ — which we don't have separately.
-// Best we can do client-side: validate format strictly and flag obviously
-// wrong numbers (e.g. all same digit, sequential runs).
-function validatePassportNumber(pn) {
-  if (!pn || pn === "Not found" || pn === "") return "empty";
-  const cleaned = pn.trim().toUpperCase();
-  if (!/^[A-Z]{2}[0-9]{7}$/.test(cleaned)) return "format_error";
-
-  // Sanity checks on the 7-digit portion
-  const digits = cleaned.slice(2);
-  if (/^(\d)\1{6}$/.test(digits)) return "suspicious"; // all same digit e.g. 0000000
-  if (digits === "1234567" || digits === "7654321") return "suspicious";
-
-  // MRZ check digit over the 9-char passport number field
-  // The check digit character follows immediately after in the MRZ line —
-  // we don't have it, so we compute what it SHOULD be and store it for display.
-  const expectedCheckDigit = mrzComputeCheckDigit(cleaned);
-  return { status: "valid", checkDigit: expectedCheckDigit, formatted: cleaned };
-}
 
 /* ─── COPY BUTTON ────────────────────────────────────────────────── */
 function CopyBtn({ value }) {
@@ -1933,6 +703,7 @@ function ProfileCard({ data, setData, preferredOfferIndex, setPreferredOfferInde
   const autoLookup   = requirementsData ? lookupFundsRequired(data, preferredOfferIndex, requirementsData) : null;
   const showFundsReq = !!(data.fundsRequired && data.fundsRequired.trim()) || !!autoLookup;
   const [profileCollapsed, setProfileCollapsed] = useState(false);
+  const [profileTab, setProfileTab] = useState("personal");
 
   const rows = [
     { group: "Personal Information", fields: [
@@ -1943,8 +714,8 @@ function ProfileCard({ data, setData, preferredOfferIndex, setPreferredOfferInde
       {k:"passportIssueDate", l:"Passport Issued"},
       {k:"passportExpiry",   l:"Passport Expiry"},
       {k:"cnicNumber",              l:"CNIC Number"},
-	  {k:"cnicExpiry",              l:"CNIC Expiry"},
-	  {k:"cnicAddressRomanUrdu",    l:"CNIC Address (Roman Urdu)", w:true, multiline:true, placeholder:"Upload both sides of CNIC to extract"},
+    {k:"cnicExpiry",              l:"CNIC Expiry"},
+    {k:"cnicAddressRomanUrdu",    l:"CNIC Address (Roman Urdu)", w:true, multiline:true, placeholder:"Upload both sides of CNIC to extract"},
       {k:"gender",        l:"Gender"},
       {k:"city",          l:"City"},
       {k:"mobileNumber",  l:"Mobile Number"},
@@ -1969,28 +740,98 @@ function ProfileCard({ data, setData, preferredOfferIndex, setPreferredOfferInde
     ]},
   ];
 
+  // Tab → row group mapping
+  const TAB_GROUP = {
+    personal:  "Personal Information",
+    academic:  "Academic Background",
+    english:   "English Qualifications",
+    financial: "Financial",
+    offers:    "__offers__",
+  };
+
+  // Build initials for avatar
+  const initials = (() => {
+    const n = data.fullName && data.fullName !== "Not found" ? data.fullName : "";
+    return n.trim().split(/\s+/).filter(Boolean).slice(0,2).map(w=>w[0].toUpperCase()).join("") || "?";
+  })();
+
+  const offerCount = Array.isArray(data.offerLetters) ? data.offerLetters.filter(o => o.university || o.country).length : 0;
+
   return (
-    <div className="rc rc-purple">
-      <button className={`rc-hdr--btn rc-hdr--purple${profileCollapsed?" collapsed":""}`} onClick={()=>setProfileCollapsed(c=>!c)}>
-        <div className="rc-ico"><User size={14} color="#fff"/></div>
-        <span className="rc-ttl">Student Profile</span>
-        <span className="badge b-ok"><CheckCircle size={10}/>Extracted</span>
-        <ChevronDown size={14} className={`rc-collapse-chevron${profileCollapsed?"":" open"}`}/>
-      </button>
-      {!profileCollapsed && <div className="rc-body">
-        <ExpiryAlerts profile={data}/>
-        {data.studyGap && data.studyGap !== "Not found" && data.studyGap !== "" && (
-          <div className="study-gap-alert">
-            <Clock size={14} style={{flexShrink:0,marginTop:1}}/>
-            <div>
-              <div className="study-gap-title">Study Gap Detected</div>
-              <div className="study-gap-detail">{data.studyGap}</div>
-            </div>
+    <div className="rc rc-purple vl-profile-card">
+      {/* ── Identity header ── */}
+      <div className="vl-profile-identity">
+        <div className="vl-profile-avatar">{initials}</div>
+        <div className="vl-profile-namewrap">
+          <div className="vl-profile-name">
+            {data.fullName && data.fullName !== "Not found" ? data.fullName : "Unknown Student"}
           </div>
-        )}
-        <div className="edit-bar"><Edit3 size={13} color="#1D6BE8"/><span className="edit-hint">Click any field to edit or fill in missing info</span></div>
+          <div className="vl-profile-sub">
+            {[
+              data.passportNumber && data.passportNumber !== "Not found" ? `Passport ${data.passportNumber}` : null,
+              data.nationality    && data.nationality    !== "Not found" ? data.nationality : null,
+            ].filter(Boolean).join(" · ") || "No profile data yet"}
+          </div>
+        </div>
+        <div className="vl-profile-badges">
+          <span className="badge b-ok" style={{fontSize:9}}><CheckCircle size={9}/>Extracted</span>
+          {data.studyGap && data.studyGap !== "Not found" && data.studyGap !== "" && (
+            <span className="badge b-warn" style={{fontSize:9}}><Clock size={9}/>Gap</span>
+          )}
+          {Array.isArray(data.nameMismatches) && data.nameMismatches.length > 0 && (
+            <span className="badge b-err" style={{fontSize:9}}><AlertCircle size={9}/>Mismatch</span>
+          )}
+        </div>
+        <button
+          className="vl-profile-collapse-btn"
+          onClick={()=>setProfileCollapsed(c=>!c)}
+          title={profileCollapsed ? "Expand" : "Collapse"}
+          style={{background:"none",border:"none",cursor:"pointer",padding:4,color:"var(--t3)",display:"flex",alignItems:"center"}}
+        >
+          <ChevronDown size={14} style={{transition:"transform 200ms",transform:profileCollapsed?"none":"rotate(180deg)"}}/>
+        </button>
+      </div>
+
+      {!profileCollapsed && <div className="vl-profile-body">
+        {/* ── Alerts strip ── */}
+        <div style={{padding:"0 16px"}}>
+          <ExpiryAlerts profile={data}/>
+          {data.studyGap && data.studyGap !== "Not found" && data.studyGap !== "" && (
+            <div className="study-gap-alert">
+              <Clock size={14} style={{flexShrink:0,marginTop:1}}/>
+              <div>
+                <div className="study-gap-title">Study Gap Detected</div>
+                <div className="study-gap-detail">{data.studyGap}</div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ── Tab strip ── */}
+        <div className="vl-profile-tabs">
+          {[
+            {id:"personal",  label:"Personal"},
+            {id:"academic",  label:"Academic"},
+            {id:"english",   label:"English"},
+            {id:"financial", label:"Financial"},
+            {id:"offers",    label:"Offers", count: offerCount},
+          ].map(t => (
+            <button key={t.id} className={`vl-ptab${profileTab===t.id?" on":""}`} onClick={()=>setProfileTab(t.id)}>
+              {t.label}
+              {t.count > 0 && <span className="vl-ptab-count">{t.count}</span>}
+            </button>
+          ))}
+        </div>
+
+        <div style={{padding:"4px 16px 2px",borderBottom:"1px solid var(--bd)"}}>
+          <div className="edit-bar" style={{marginBottom:0}}><Edit3 size={12} color="#1D6BE8"/><span className="edit-hint">Click any field to edit</span></div>
+        </div>
+
+        {/* ── Tab content: field groups ── */}
         {rows.map(row => (
-          <div key={row.group} className="pgroup">
+          <div key={row.group} style={{display: TAB_GROUP[profileTab] === row.group ? "block" : "none"}}>
+            <div className="rc-body" style={{paddingTop:12}}>
+            <div className="pgroup">
             <div className="pgroup-label">{row.group}</div>
             <div className="pgrid">
               {row.fields.map(f => (
@@ -2172,15 +1013,30 @@ function ProfileCard({ data, setData, preferredOfferIndex, setPreferredOfferInde
                 <FundsSufficiencyBanner balance={data.financialBalance} required={data.fundsRequired}/>
               </div>
             )}
+            </div>{/* close pgroup */}
+            </div>{/* close rc-body */}
           </div>
         ))}
-        {/* Offer Letters */}
-        <OfferLettersSection data={data} setData={setData} preferredIdx={preferredOfferIndex} setPreferredIdx={setPreferredOfferIndex}/>
 
-        {/* CAS & Pre-CAS Documents */}
-        <CasDocumentsSection data={data} setData={setData}/>
+        {/* ── Offers tab ── */}
+        {profileTab === "offers" && (
+          <div className="rc-body" style={{paddingTop:12}}>
+            <OfferLettersSection data={data} setData={setData} preferredIdx={preferredOfferIndex} setPreferredIdx={setPreferredOfferIndex}/>
+            <CasDocumentsSection data={data} setData={setData}/>
+          </div>
+        )}
 
-	 {/* Detected Special Documents */}
+        {/* Keep OfferLettersSection + CasDocumentsSection still rendered (hidden) so state is preserved */}
+        {profileTab !== "offers" && (
+          <div style={{display:"none"}}>
+            <OfferLettersSection data={data} setData={setData} preferredIdx={preferredOfferIndex} setPreferredIdx={setPreferredOfferIndex}/>
+            <CasDocumentsSection data={data} setData={setData}/>
+          </div>
+        )}
+
+   {/* Detected Special Documents */}
+        {/* Detected docs + name mismatches — always shown in Personal tab */}
+        {profileTab === "personal" && (<div className="rc-body" style={{paddingTop:4}}>
 {Array.isArray(data.detectedDocs) && data.detectedDocs.length > 0 && (
   <div className="pgroup">
     <div className="pgroup-label" style={{display:"flex",alignItems:"center",gap:8}}>
@@ -2194,16 +1050,16 @@ function ProfileCard({ data, setData, preferredOfferIndex, setPreferredOfferInde
             {doc.type}
           </div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
-            {doc.from        && <div style={{gridColumn:"1/-1"}}><div className="plbl" style={{display:"flex",alignItems:"center"}}>Signed By<CopyBtn value={doc.from}/></div><div style={{fontSize:12,fontWeight:600,color:"var(--t1)"}}>{doc.from}</div></div>}
-            {doc.role        && <div style={{gridColumn:"1/-1"}}><div className="plbl" style={{display:"flex",alignItems:"center"}}>Signatory Title<CopyBtn value={doc.role}/></div><div style={{fontSize:12,color:"var(--t2)",fontFamily:"var(--fm)"}}>{doc.role}</div></div>}
-            {doc.employeeRole&& <div style={{gridColumn:"1/-1"}}><div className="plbl" style={{display:"flex",alignItems:"center"}}>Employee Role<CopyBtn value={doc.employeeRole}/></div><div style={{fontSize:12,fontWeight:600,color:"var(--t1)"}}>{doc.employeeRole}</div></div>}
-            {doc.duration    && <div style={{gridColumn:"1/-1"}}><div className="plbl" style={{display:"flex",alignItems:"center"}}>Duration<CopyBtn value={doc.duration}/></div><div style={{fontSize:12,color:"var(--t2)",fontFamily:"var(--fm)"}}>{doc.duration}</div></div>}
-            {doc.reference   && <div><div className="plbl" style={{display:"flex",alignItems:"center"}}>Reference<CopyBtn value={doc.reference}/></div><div style={{fontSize:12,fontWeight:600,color:"var(--t1)"}}>{doc.reference}</div></div>}
-            {doc.amount      && <div><div className="plbl" style={{display:"flex",alignItems:"center"}}>Amount<CopyBtn value={doc.amount}/></div><div style={{fontSize:12,fontWeight:600,color:"var(--t1)"}}>{doc.amount}</div></div>}
-            {doc.date        && <div><div className="plbl" style={{display:"flex",alignItems:"center"}}>Date<CopyBtn value={doc.date}/></div><div style={{fontSize:12,fontWeight:600,color:"var(--t1)"}}>{doc.date}</div></div>}
-            {doc.expiry      && <div><div className="plbl" style={{display:"flex",alignItems:"center"}}>Expiry<CopyBtn value={doc.expiry}/></div><div style={{fontSize:12,fontWeight:600,color:"var(--t1)"}}>{doc.expiry}</div></div>}
-            {doc.result      && <div><div className="plbl" style={{display:"flex",alignItems:"center"}}>Result<CopyBtn value={doc.result}/></div><div style={{fontSize:12,fontWeight:600,color:doc.result==="Clear"?"var(--ok)":"var(--err)"}}>{doc.result}</div></div>}
-            {doc.institution && <div style={{gridColumn:"1/-1"}}><div className="plbl" style={{display:"flex",alignItems:"center"}}>Institution<CopyBtn value={doc.institution}/></div><div style={{fontSize:12,fontWeight:600,color:"var(--t1)"}}>{doc.institution}</div></div>}
+            {doc.from        && <div style={{gridColumn:"1/-1"}}><div className="plbl" style={{display:"flex",alignItems:"center"}}>Signed By<CopyBtn value={doc.from}/></div><div style={{fontSize:14,fontWeight:600,color:doc.from&&doc.from!=="Not found"?"var(--t1)":"var(--err)"}}>{doc.from||<span style={{color:"var(--err)",fontStyle:"italic",fontSize:13}}>Not found</span>}</div></div>}
+            {doc.role        && <div style={{gridColumn:"1/-1"}}><div className="plbl" style={{display:"flex",alignItems:"center"}}>Signatory Title<CopyBtn value={doc.role}/></div><div style={{fontSize:14,color:doc.role&&doc.role!=="Not found"?"var(--t2)":"var(--err)",fontFamily:"var(--fu)"}}>{doc.role||<span style={{color:"var(--err)",fontStyle:"italic",fontSize:13}}>Not found</span>}</div></div>}
+            {doc.employeeRole&& <div style={{gridColumn:"1/-1"}}><div className="plbl" style={{display:"flex",alignItems:"center"}}>Employee Role<CopyBtn value={doc.employeeRole}/></div><div style={{fontSize:14,fontWeight:600,color:doc.employeeRole&&doc.employeeRole!=="Not found"?"var(--t1)":"var(--err)"}}>{doc.employeeRole}</div></div>}
+            {doc.duration    && <div style={{gridColumn:"1/-1"}}><div className="plbl" style={{display:"flex",alignItems:"center"}}>Duration<CopyBtn value={doc.duration}/></div><div style={{fontSize:14,color:doc.duration&&doc.duration!=="Not found"?"var(--t2)":"var(--err)",fontFamily:"var(--fu)"}}>{doc.duration}</div></div>}
+            {doc.reference   && <div><div className="plbl" style={{display:"flex",alignItems:"center"}}>Reference<CopyBtn value={doc.reference}/></div><div style={{fontSize:14,fontWeight:600,color:doc.reference&&doc.reference!=="Not found"?"var(--t1)":"var(--err)"}}>{doc.reference}</div></div>}
+            {doc.amount      && <div><div className="plbl" style={{display:"flex",alignItems:"center"}}>Amount<CopyBtn value={doc.amount}/></div><div style={{fontSize:14,fontWeight:600,color:doc.amount&&doc.amount!=="Not found"?"var(--t1)":"var(--err)"}}>{doc.amount}</div></div>}
+            {doc.date        && <div><div className="plbl" style={{display:"flex",alignItems:"center"}}>Date<CopyBtn value={doc.date}/></div><div style={{fontSize:14,fontWeight:600,color:doc.date&&doc.date!=="Not found"?"var(--t1)":"var(--err)"}}>{doc.date}</div></div>}
+            {doc.expiry      && <div><div className="plbl" style={{display:"flex",alignItems:"center"}}>Expiry<CopyBtn value={doc.expiry}/></div><div style={{fontSize:14,fontWeight:600,color:doc.expiry&&doc.expiry!=="Not found"?"var(--t1)":"var(--err)"}}>{doc.expiry}</div></div>}
+            {doc.result      && <div><div className="plbl" style={{display:"flex",alignItems:"center"}}>Result<CopyBtn value={doc.result}/></div><div style={{fontSize:14,fontWeight:600,color:doc.result==="Clear"?"var(--ok)":doc.result&&doc.result!=="Not found"?"var(--err)":"var(--err)"}}>{doc.result}</div></div>}
+            {doc.institution && <div style={{gridColumn:"1/-1"}}><div className="plbl" style={{display:"flex",alignItems:"center"}}>Institution<CopyBtn value={doc.institution}/></div><div style={{fontSize:14,fontWeight:600,color:doc.institution&&doc.institution!=="Not found"?"var(--t1)":"var(--err)"}}>{doc.institution}</div></div>}
             {/* FRC-specific: member count */}
             {doc.type === "FRC" && (doc.memberCount || (Array.isArray(doc.members) && doc.members.length > 0)) && (
               <div style={{gridColumn:"1/-1"}}>
@@ -2229,17 +1085,17 @@ function ProfileCard({ data, setData, preferredOfferIndex, setPreferredOfferInde
               </div>
             )}
             {/* MRC-specific: husband/wife names */}
-            {doc.type === "MRC" && doc.husbandName && <div><div className="plbl" style={{display:"flex",alignItems:"center"}}>Husband Name<CopyBtn value={doc.husbandName}/></div><div style={{fontSize:12,fontWeight:600,color:"var(--t1)"}}>{doc.husbandName}</div></div>}
-            {doc.type === "MRC" && doc.wifeName    && <div><div className="plbl" style={{display:"flex",alignItems:"center"}}>Wife Name<CopyBtn value={doc.wifeName}/></div><div style={{fontSize:12,fontWeight:600,color:"var(--t1)"}}>{doc.wifeName}</div></div>}
-            {doc.type === "MRC" && doc.registrationNo && <div style={{gridColumn:"1/-1"}}><div className="plbl" style={{display:"flex",alignItems:"center"}}>Registration No.<CopyBtn value={doc.registrationNo}/></div><div style={{fontSize:12,fontWeight:600,color:"var(--t1)"}}>{doc.registrationNo}</div></div>}
-            {doc.notes       && <div style={{gridColumn:"1/-1"}}><div className="plbl" style={{display:"flex",alignItems:"center"}}>Notes<CopyBtn value={doc.notes}/></div><div style={{fontSize:12,color:"var(--t2)",fontFamily:"var(--fm)"}}>{doc.notes}</div></div>}
+            {doc.type === "MRC" && doc.husbandName && <div><div className="plbl" style={{display:"flex",alignItems:"center"}}>Husband Name<CopyBtn value={doc.husbandName}/></div><div style={{fontSize:14,fontWeight:600,color:doc.husbandName&&doc.husbandName!=="Not found"?"var(--t1)":"var(--err)"}}>{doc.husbandName}</div></div>}
+            {doc.type === "MRC" && doc.wifeName    && <div><div className="plbl" style={{display:"flex",alignItems:"center"}}>Wife Name<CopyBtn value={doc.wifeName}/></div><div style={{fontSize:14,fontWeight:600,color:doc.wifeName&&doc.wifeName!=="Not found"?"var(--t1)":"var(--err)"}}>{doc.wifeName}</div></div>}
+            {doc.type === "MRC" && doc.registrationNo && <div style={{gridColumn:"1/-1"}}><div className="plbl" style={{display:"flex",alignItems:"center"}}>Registration No.<CopyBtn value={doc.registrationNo}/></div><div style={{fontSize:14,fontWeight:600,color:doc.registrationNo&&doc.registrationNo!=="Not found"?"var(--t1)":"var(--err)"}}>{doc.registrationNo}</div></div>}
+            {doc.notes       && <div style={{gridColumn:"1/-1"}}><div className="plbl" style={{display:"flex",alignItems:"center"}}>Notes<CopyBtn value={doc.notes}/></div><div style={{fontSize:13,color:doc.notes&&doc.notes!=="Not found"?"var(--t2)":"var(--err)",fontFamily:"var(--fu)",lineHeight:1.55}}>{doc.notes}</div></div>}
           </div>
         </div>
       ))}
     </div>
   </div>
 )}
-	{/* Name Mismatches */}
+  {/* Name Mismatches */}
 {Array.isArray(data.nameMismatches) && data.nameMismatches.length > 0 && (
   <div className="pgroup">
     <div className="pgroup-label" style={{display:"flex",alignItems:"center",gap:8}}>
@@ -2260,13 +1116,14 @@ function ProfileCard({ data, setData, preferredOfferIndex, setPreferredOfferInde
         <span style={{flexShrink:0,marginTop:1}}>⚠️</span>
         <span>Name mismatches must be resolved before visa submission. A statutory declaration or affidavit may be required.</span>
       </div>
-    </div>
+      </div>
   </div>
-)} {/* <-- Close conditional block with )} */}
-    </div>} {/* <-- Close rc-body with </div>} */}
-  </div> // <-- Close main rc div
+      )} {/* end nameMismatches */}
+        </div>)} {/* end personal tab rc-body */}
+      </div>}{/* end !profileCollapsed */}
+    </div>
   );
-} // <-- Close function with } instead of )}
+}
 
 /* ─── SIDEBAR DOC CHECKLIST (hybrid: auto-detection from classifications + manual override) ── */
 function SidebarDocChecklist({ profile, preferredOfferIndex, docs, docTypes }) {
@@ -2388,7 +1245,7 @@ function UniversityChecker({ profile, requirementsData, compact, preferredOfferI
     setCountry(r.country || "");
     setUniName(r.university || "");
     setProgName("");
-  }, [preferredOfferIndex, profile]);
+  }, [preferredOfferIndex]); // eslint-disable-line react-hooks/exhaustive-deps
   const countries   = Object.keys(requirementsData);
   const countryData = country ? requirementsData[country] : null;
   const unis        = countryData ? Object.keys(countryData.universities) : [];
@@ -2485,28 +1342,31 @@ function UniversityChecker({ profile, requirementsData, compact, preferredOfferI
   const isCustomCountry = country && !BUILTIN_COUNTRIES.includes(country);
 
   return (
-    <div className={compact ? "uni-sidebar-card" : "rc rc-blue"}>
+    <div className={compact ? "uni-sidebar-card" : "rc rc-blue vl-uni-card"}>
+      {/* ── Header ── */}
       <div className={compact ? "uni-sidebar-hdr" : "rc-hdr rc-hdr--blue"}>
         <div className="rc-ico"><Building2 size={14} color="#fff"/></div>
         <span className={compact ? "uni-sidebar-ttl" : "rc-ttl"}>University Checker</span>
         {country && (
           <span className={`uni-src-badge ${isCustomCountry ? "custom" : "builtin"}`} style={{margin:0}}>
-  {isCustomCountry 
-    ? <><FileSpreadsheet size={10} color="#fff"/>CSV</> // Added color="#fff"
-    : <><Info size={10} color="#fff"/>Built-in</>      // Added color="#fff"
-  }
-</span>
+            {isCustomCountry
+              ? <><FileSpreadsheet size={10} color="#fff"/>CSV</>
+              : <><Info size={10} color="#fff"/>Built-in</>
+            }
+          </span>
         )}
         {(country||uniName||progName) && (
           <button onClick={handleReset} title="Reset university checker"
-            style={{marginLeft:"auto",fontSize:11,fontWeight:600,color:"#fff",background:"transparent",border:"1px solid var(--bd)",borderRadius:"var(--r1)",padding:"2px 8px",cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>
+            style={{marginLeft:"auto",fontSize:11,fontWeight:600,color:"#fff",background:"transparent",border:"1px solid rgba(255,255,255,.3)",borderRadius:"var(--r1)",padding:"2px 8px",cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>
             <RefreshCw size={10}/>Reset
           </button>
         )}
       </div>
+
       <div className={compact ? "uni-sidebar-body" : "rc-body"}>
-        {/* In compact (sidebar) mode, stack selects vertically */}
-        <div className={compact ? "uni-selects-stack" : "uni-selects"}>
+
+        {/* ── Selects: horizontal on full-width, stacked in compact ── */}
+        <div className={compact ? "uni-selects-stack" : "vl-uni-selects-row"}>
           <div className="uni-select-wrap">
             <label className="uni-select-lbl">Country</label>
             <select className="uni-select" value={country} onChange={e => handleCountryChange(e.target.value)}>
@@ -2536,29 +1396,36 @@ function UniversityChecker({ profile, requirementsData, compact, preferredOfferI
 
         {prog && countryData && uniData && (
           <div className="uni-result">
-            <div className={`uni-verdict ${verdict}`}>
-              <span className={`uni-verdict-txt ${verdict}`}>{verdictText}</span>
-              <span className="badge b-neu">{uniData.ranking}</span>
+            {/* ── Verdict bar ── */}
+            <div className={`vl-uni-verdict-bar ${verdict}`} style={{marginBottom:10}}>
+              <span style={{fontSize:13}}>{verdict==="eligible"?"✓":verdict==="ineligible"?"✗":"⚠️"}</span>
+              <span style={{flex:1}}>{verdictText}</span>
+              <span className="badge b-neu" style={{flexShrink:0}}>{uniData.ranking}</span>
             </div>
-            <div className="uni-req-grid">
+
+            {/* ── Inline requirement rows ── */}
+            <div style={{display:"flex",flexDirection:"column",gap:5,marginBottom:10}}>
               {[
-                {label:"Min GPA",            req:prog.gpa,       val:profile.academicResult,   type:"gpa",       fmt:v=>`${v}`},
-                {label:"English Proficiency", req:prog.ielts,     val:englishScoreLabel(profile), type:"ielts",     fmt:v=>`IELTS ${v} equiv.`},
+                {label:"Min GPA",            req:prog.gpa,       val:profile.academicResult,   type:"gpa",       fmt:v=>`GPA ${v}`},
+                {label:"English Proficiency", req:prog.ielts,     val:englishScoreLabel(profile), type:"ielts",     fmt:v=>`IELTS ${v}+`},
                 {label:"Financial Req.",      req:prog.financial, val:profile.financialBalance,   type:"financial", fmt:v=>`${v.toLocaleString()}`},
               ].map(r => {
                 const status = r.type === "ielts"
                   ? checkReq(null, r.req, "ielts", profile)
                   : checkReq(r.val, r.req, r.type);
+                const icon = status==="pass" ? "✓" : status==="fail" ? "✗" : "?";
                 return (
-                  <div key={r.label} className={`uni-req-item ${status}`}>
-                    <div className={`uni-req-label ${status}`}>{r.label}</div>
-                    <div className="uni-req-val">Req: {r.fmt(r.req)}</div>
-                    <div className="uni-req-student">Student: {r.val||"Not found"}</div>
-                    <div className="uni-req-need">{status==="pass"?"✓ Met":status==="fail"?"✗ Not met":"? Check profile"}</div>
+                  <div key={r.label} className={`vl-uni-req-row ${status}`}>
+                    <div className={`vl-uni-req-icon ${status}`}>{icon}</div>
+                    <div className="vl-uni-req-label">{r.label}</div>
+                    <div className="vl-uni-req-threshold">{r.fmt(r.req)}</div>
+                    <div className={`vl-uni-req-student ${status}`}>{r.val||"Not found"}</div>
                   </div>
                 );
               })}
             </div>
+
+            {/* ── Programme info grid ── */}
             <div className="uni-info-grid">
               <div className="uni-info-item"><div className="uni-info-lbl">Level</div><div className="uni-info-val">{prog.level}</div></div>
               <div className="uni-info-item"><div className="uni-info-lbl">Duration</div><div className="uni-info-val">{prog.duration}</div></div>
@@ -3212,7 +2079,7 @@ function EligFindings({ findings }) {
   if (!Array.isArray(findings) || findings.length === 0) return null;
   return (
     <div style={{marginBottom:8}}>
-      <div style={{fontSize:10,fontWeight:700,color:"var(--t3)",letterSpacing:".07em",textTransform:"uppercase",marginBottom:6,paddingBottom:5,borderBottom:"1px solid var(--bd)"}}>
+      <div style={{fontSize:11,fontWeight:700,color:"var(--t3)",letterSpacing:".07em",textTransform:"uppercase",marginBottom:6,paddingBottom:5,borderBottom:"1px solid var(--bd)"}}>
         🔍 Notable Findings
       </div>
       <div style={{display:"flex",flexDirection:"column",gap:6}}>
@@ -3224,10 +2091,10 @@ function EligFindings({ findings }) {
           }}>
             <span style={{fontSize:15,lineHeight:1,flexShrink:0,marginTop:1}}>🔍</span>
             <div>
-              <div style={{fontSize:10,fontWeight:700,color:"#1D6BE8",letterSpacing:".06em",textTransform:"uppercase",marginBottom:3}}>
+              <div style={{fontSize:11,fontWeight:700,color:"#1D6BE8",letterSpacing:".05em",textTransform:"uppercase",marginBottom:3,fontFamily:"var(--fh)"}}>
                 {f.title || "Notable Finding"}
               </div>
-              <div style={{fontSize:12,color:"var(--t1)",lineHeight:1.5,fontFamily:"var(--fu)"}}>
+              <div style={{fontSize:13,fontWeight:500,color:"var(--t1)",lineHeight:1.55,fontFamily:"var(--fu)"}}>
                 {f.detail}
               </div>
             </div>
@@ -3241,29 +2108,70 @@ function EligFindings({ findings }) {
 function EligCard({ data, summary, findings: findingsProp, profile, isLive }) {
   const hasSufficiency = profile?.fundsRequired && profile.fundsRequired.trim() !== "";
   const [collapsed, setCollapsed] = useState(false);
+
+  function scoreColor(s) {
+    if (!s && s !== 0) return "var(--t3)";
+    if (s >= 75) return "#059669";
+    if (s >= 50) return "#B45309";
+    return "#DC2626";
+  }
+  function scoreClass(s) {
+    if (!s && s !== 0) return "slate";
+    if (s >= 75) return "green";
+    if (s >= 50) return "amber";
+    return "red";
+  }
+
   return (
-    <div className="rc rc-elig">
+    <div className="rc rc-elig vl-elig-card">
+      {/* ── Header ── */}
       <button className={`rc-hdr--btn rc-hdr--green${collapsed?" collapsed":""}`} onClick={()=>setCollapsed(c=>!c)}>
-        <div className="rc-ico"><Globe size={14} color="#4A5D7E"/></div>
-        <span className="rc-ttl">Visa Eligibility — Executive Summary</span>
+        <div className="rc-ico"><Globe size={14} color="#fff"/></div>
+        <span className="rc-ttl">Visa Eligibility</span>
         <span className={`badge ${scoreBadge(data.overallScore)}`}><ShieldCheck size={10}/>{scoreLabel(data.overallScore)}</span>
         {isLive&&<span className="badge b-p" style={{fontSize:9,marginLeft:4}}><RefreshCw size={9}/>Live</span>}
         <ChevronDown size={14} className={`rc-collapse-chevron${collapsed?"":" open"}`}/>
       </button>
-      {!collapsed && <div className="rc-body">
-        {isLive&&<div className="elig-live-note"><Edit3 size={11}/>Scores updated from profile edits · click Re-assess for full narrative update</div>}
-        <EligSummaryCards text={summary || data.summary} />
-        <EligFindings findings={findingsProp || data.findings} />
-        <ScoreBar label="Overall Eligibility"   score={data.overallScore}/>
-        {hasSufficiency
-          ? <div className="elig-fin-override">
-              <DollarSign size={12} style={{flexShrink:0,marginTop:1}}/>
-              <span>Financial assessment overridden by sufficiency calculator — see Profile card for result.</span>
+
+      {!collapsed && <div className="rc-body" style={{paddingTop:14}}>
+        {isLive&&<div className="elig-live-note" style={{marginBottom:10}}><Edit3 size={11}/>Scores updated from profile edits · click Re-assess for full narrative update</div>}
+
+        {/* ── Score metric strip — scannable at a glance ── */}
+        <div className="vl-score-strip">
+          {[
+            {label:"Overall",   score:data.overallScore},
+            {label:"Financial", score:hasSufficiency ? null : data.financialScore, override: hasSufficiency},
+            {label:"Academic",  score:data.academicScore},
+            {label:"Documents", score:data.documentScore},
+          ].map(({label, score, override}) => (
+            <div key={label} className="vl-score-cell">
+              <div className={`vl-score-num vl-score-${scoreClass(score)}`}>
+                {override ? "—" : (score != null ? score : "—")}
+              </div>
+              <div className="vl-score-lbl">{label}</div>
+              <div className="vl-score-bar-track">
+                <div className="vl-score-bar-fill" style={{
+                  width: override ? "100%" : `${Math.max(0, Math.min(100, score||0))}%`,
+                  background: override ? "rgba(2,132,199,.4)" : scoreColor(score),
+                }}/>
+              </div>
             </div>
-          : <ScoreBar label="Financial Strength" score={data.financialScore}/>
-        }
-        <ScoreBar label="Academic Standing"     score={data.academicScore}/>
-        <ScoreBar label="Document Completeness" score={data.documentScore}/>
+          ))}
+        </div>
+
+        {hasSufficiency && (
+          <div className="elig-fin-override" style={{marginBottom:10}}>
+            <DollarSign size={12} style={{flexShrink:0,marginTop:1}}/>
+            <span>Financial score overridden by sufficiency calculator — see Profile card for result.</span>
+          </div>
+        )}
+
+        {/* ── Narrative summary + findings below scores ── */}
+        <div className="vl-elig-narrative">
+          <EligSummaryCards text={summary || data.summary} />
+          <EligFindings findings={findingsProp || data.findings} />
+        </div>
+
         {data.notes?.length>0&&<div className="elig-notes">{data.notes.map((n,i)=><div key={i} className="en"><div className="en-dot"/><span>{n}</span></div>)}</div>}
       </div>}
     </div>
@@ -3288,6 +2196,481 @@ function FlagsCard({ flags }) {
     </div>
   );
 }
+
+/* ─── MERGED RISKS CARD — two-column: Notable Findings | Risk Flags ── */
+function RisksCard({ flags, missingItems, rejections }) {
+  const allFlags  = flags || [];
+  const allMiss   = missingItems || [];
+  const allRej    = rejections || [];
+  const allClear  = allFlags.length === 0 && allMiss.length === 0 && allRej.length === 0;
+
+  const highFlags = allFlags.filter(f => f.severity === "high");
+  const medFlags  = allFlags.filter(f => f.severity !== "high");
+
+  const rejTypeLabel = t => {
+    if (t === "visa")      return { label:"Visa Rejection",     cls:"high"   };
+    if (t === "admission") return { label:"Admission Rejection", cls:"medium" };
+    if (t === "deferment") return { label:"Deferment",           cls:"low"    };
+    return                        { label:"Rejection",           cls:"medium" };
+  };
+
+  if (allClear) {
+    return (
+      <div className="all-clear" style={{marginTop:8}}>
+        <CheckCircle size={16}/>No gaps, risk flags, or rejections identified.
+      </div>
+    );
+  }
+
+  return (
+    <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, alignItems:"start"}}>
+
+      {/* ── LEFT: Notable Findings (missing docs) ── */}
+      <div>
+        <div style={{fontSize:11,fontWeight:700,color:"var(--t3)",textTransform:"uppercase",letterSpacing:".06em",marginBottom:8,paddingBottom:5,borderBottom:"1px solid var(--bd)",display:"flex",alignItems:"center",gap:5,fontFamily:"var(--fh)"}}>
+          <AlertCircle size={10}/>Notable Findings
+          {allMiss.length > 0 && <span style={{marginLeft:"auto",background:"rgba(100,116,139,.1)",color:"#64748B",borderRadius:3,fontSize:9,fontWeight:700,padding:"1px 5px"}}>{allMiss.length}</span>}
+        </div>
+        {allMiss.length === 0 ? (
+          <div style={{fontSize:13,color:"var(--t3)",fontFamily:"var(--fu)",fontWeight:500}}>No notable findings.</div>
+        ) : (
+          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+            {allMiss.map((it,i)=>(
+              <div key={i} style={{background:"var(--s2)",border:"1px solid var(--bd)",borderRadius:"var(--r1)",padding:"8px 10px"}}>
+                <div style={{fontSize:13,fontWeight:700,color:"var(--t1)",marginBottom:2,fontFamily:"var(--fu)"}}>{it.document}</div>
+                <div style={{fontSize:13,color:"var(--t2)",fontFamily:"var(--fu)",fontWeight:500,lineHeight:1.55}}>{it.reason}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Rejections live in Notable Findings column */}
+        {allRej.length > 0 && (
+          <div style={{marginTop:10}}>
+            <div style={{fontSize:11,fontWeight:700,color:"var(--t3)",textTransform:"uppercase",letterSpacing:".06em",marginBottom:6,paddingBottom:5,borderBottom:"1px solid var(--bd)",display:"flex",alignItems:"center",gap:5,fontFamily:"var(--fu)"}}>
+              <XCircle size={10}/>Rejections
+              <span style={{marginLeft:"auto",background:"rgba(220,38,38,.1)",color:"#DC2626",borderRadius:3,fontSize:9,fontWeight:700,padding:"1px 5px"}}>{allRej.length}</span>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              {allRej.map((it,i)=>{
+                const {label,cls} = rejTypeLabel(it.type);
+                return (
+                  <div key={i} className={`rej-item ${cls}`}>
+                    <div className="rej-top">
+                      <span className={`fsev ${cls}`}>{label}</span>
+                      {it.date && <span className="rej-date">{it.date}</span>}
+                    </div>
+                    <div className="rej-grid">
+                      {it.country    && <div className="rej-f"><div className="rej-l">Country</div><div className="rej-v">{it.country}</div></div>}
+                      {it.university && <div className="rej-f"><div className="rej-l">University</div><div className="rej-v">{it.university}</div></div>}
+                      {it.program    && <div className="rej-f"><div className="rej-l">Programme</div><div className="rej-v">{it.program}</div></div>}
+                      {it.reason     && <div className="rej-f rej-full"><div className="rej-l">Reason</div><div className="rej-v">{it.reason}</div></div>}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* ── RIGHT: Risk Flags ── */}
+      <div>
+        <div style={{fontSize:11,fontWeight:700,color:"var(--t3)",textTransform:"uppercase",letterSpacing:".06em",marginBottom:8,paddingBottom:5,borderBottom:"1px solid var(--bd)",display:"flex",alignItems:"center",gap:5,fontFamily:"var(--fu)"}}>
+          <Flag size={10}/>Risk Flags
+          {allFlags.length > 0 && (
+            <span style={{marginLeft:"auto",background: highFlags.length > 0 ? "rgba(220,38,38,.1)" : "rgba(245,158,11,.1)",color: highFlags.length > 0 ? "#DC2626" : "#B45309",borderRadius:3,fontSize:9,fontWeight:700,padding:"1px 5px"}}>
+              {allFlags.length}
+            </span>
+          )}
+        </div>
+        {allFlags.length === 0 ? (
+          <div style={{fontSize:12,color:"var(--t3)",fontFamily:"var(--fu)",fontWeight:500}}>No risk flags.</div>
+        ) : (
+          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+            {highFlags.map((f,i)=>(
+              <div key={`h${i}`} className="fi high">
+                <span className="fsev high">{f.severity}</span>
+                <div><div className="fttl">{f.flag}</div><div className="fdet">{f.detail}</div></div>
+              </div>
+            ))}
+            {medFlags.map((f,i)=>(
+              <div key={`m${i}`} className={`fi ${f.severity}`}>
+                <span className={`fsev ${f.severity}`}>{f.severity}</span>
+                <div><div className="fttl">{f.flag}</div><div className="fdet">{f.detail}</div></div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+    </div>
+  );
+}
+/* ─── DETECTED SPECIAL DOCUMENTS CARD ───────────────────────────────── */
+// Surfaces detectedDocs from profileData as a top-level card in the Analyser
+// so counsellors see critical docs (IHS, TB, FRC, NOC, etc.) without opening ProfileCard.
+// The source data is the same — no duplication.
+const DETECTED_DOC_META = {
+  "IHS Receipt":              { icon: "💳", color: "#1D6BE8", bg: "rgba(29,107,232,.08)",  bd: "rgba(29,107,232,.25)"  },
+  "TB Certificate":           { icon: "🩺", color: "#059669", bg: "rgba(5,150,105,.08)",   bd: "rgba(5,150,105,.25)"   },
+  "FRC":                      { icon: "👨‍👩‍👧‍👦", color: "#7c3aed", bg: "rgba(124,58,237,.08)", bd: "rgba(124,58,237,.25)"  },
+  "MRC":                      { icon: "💍", color: "#7c3aed", bg: "rgba(124,58,237,.08)", bd: "rgba(124,58,237,.25)"  },
+  "NOC":                      { icon: "✅", color: "#059669", bg: "rgba(5,150,105,.08)",   bd: "rgba(5,150,105,.25)"   },
+  "Sponsor Letter":           { icon: "💰", color: "#B45309", bg: "rgba(245,158,11,.08)",  bd: "rgba(245,158,11,.3)"   },
+  "Experience Letter":        { icon: "💼", color: "#4A5D7E", bg: "rgba(74,93,126,.08)",   bd: "rgba(74,93,126,.25)"   },
+  "Recommendation Letter":    { icon: "📋", color: "#1D6BE8", bg: "rgba(29,107,232,.08)",  bd: "rgba(29,107,232,.25)"  },
+  "Gap Letter":               { icon: "📅", color: "#B45309", bg: "rgba(245,158,11,.08)",  bd: "rgba(245,158,11,.3)"   },
+  "Scholarship Letter":       { icon: "🎓", color: "#059669", bg: "rgba(5,150,105,.08)",   bd: "rgba(5,150,105,.25)"   },
+  "Health Insurance":         { icon: "🏥", color: "#1D6BE8", bg: "rgba(29,107,232,.08)",  bd: "rgba(29,107,232,.25)"  },
+  "Accommodation Confirmation":{ icon: "🏠", color: "#059669", bg: "rgba(5,150,105,.08)",  bd: "rgba(5,150,105,.25)"   },
+  "University Fee Receipt":   { icon: "🧾", color: "#4A5D7E", bg: "rgba(74,93,126,.08)",   bd: "rgba(74,93,126,.25)"   },
+  "Application Fee Receipt":  { icon: "🧾", color: "#4A5D7E", bg: "rgba(74,93,126,.08)",   bd: "rgba(74,93,126,.25)"   },
+  "Visa Fee Receipt":         { icon: "🧾", color: "#4A5D7E", bg: "rgba(74,93,126,.08)",   bd: "rgba(74,93,126,.25)"   },
+  "Death Certificate":        { icon: "📄", color: "#DC2626", bg: "rgba(220,38,38,.08)",   bd: "rgba(220,38,38,.25)"   },
+};
+function getDocMeta(type) {
+  return DETECTED_DOC_META[type] || { icon: "📄", color: "var(--t2)", bg: "var(--s2)", bd: "var(--bd)" };
+}
+
+/* ─── SMART DETECTED DOCUMENTS DERIVER ──────────────────────────────────────
+ * Priority order:
+ *   Tier 1 — profileData field-presence  (AI extracted — most accurate)
+ *   Tier 2 — profileData.detectedDocs[]  (special docs: IHS, NOC, TB, etc.)
+ *   Tier 3 — Supabase doc_list[]         (persisted list from last save)
+ *   Tier 4 — uploaded docs[]             (raw file list — last resort)
+ *
+ * Returns: Array<{ label, type, color, icon, source, detail?, status? }>
+ * Each entry deduped by type-key. Source tells the UI where the data came from.
+ */
+
+/** Returns true if val is a non-empty, non-null, non-whitespace value. */
+function isDocVal(val) {
+  if (val === null || val === undefined) return false;
+  if (typeof val === 'string') return val.trim().length > 0;
+  if (typeof val === 'number') return !isNaN(val);
+  if (Array.isArray(val)) return val.length > 0;
+  return Boolean(val);
+}
+
+function deriveDetectedDocs(profileData, results, docs, docTypes, supabaseDocList) {
+  const p   = profileData || {};
+  const md  = ((results || {}).missingDocuments || []).map(d => (d.document || '').toLowerCase());
+  const out = new Map(); // type-key → entry
+
+  function add(key, entry) {
+    if (!out.has(key)) out.set(key, entry);
+  }
+
+  // ── TIER 1: profileData field presence ───────────────────────────────────────
+  // Passport
+  const passportNum    = isDocVal(p.passportNumber);
+  const passportExpiry = isDocVal(p.passportExpiry);
+  if (passportNum || passportExpiry) {
+    const expired = (() => {
+      if (!passportExpiry) return false;
+      const parts = (p.passportExpiry || '').trim().match(/^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})$/);
+      const months = { jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12 };
+      let iso = null;
+      if (parts) { const m = months[parts[2].toLowerCase().slice(0,3)]; if (m) iso = `${parts[3]}-${String(m).padStart(2,'0')}-${parts[1].padStart(2,'0')}`; }
+      if (!iso) iso = p.passportExpiry;
+      return iso ? new Date(iso) < new Date() : false;
+    })();
+    add('passport', {
+      label: 'Passport', type: 'passport',
+      color: expired ? '#DC2626' : '#1D6BE8', icon: '🛂',
+      source: 'ai',
+      detail: passportNum ? p.passportNumber : null,
+      status: expired ? 'expired' : passportNum && passportExpiry ? 'ok' : 'partial',
+    });
+  }
+
+  // English tests (IELTS / TOEFL / PTE)
+  const englishTests = Array.isArray(p.englishTests) ? p.englishTests.filter(t => isDocVal(t.overallScore)) : [];
+  if (englishTests.length > 0) {
+    englishTests.forEach((t, i) => {
+      const ttype = (t.type || 'english').toLowerCase().replace(/\s+/g, '_');
+      add(ttype + '_' + i, {
+        label: t.type || 'English Test', type: 'english_test',
+        color: '#B45309', icon: '📝',
+        source: 'ai',
+        detail: t.overallScore ? `Score: ${t.overallScore}` : null,
+        status: 'ok',
+      });
+    });
+  } else if (isDocVal(p.ieltsScore)) {
+    add('ielts', { label: 'IELTS', type: 'ielts', color: '#B45309', icon: '📝', source: 'ai', detail: `Score: ${p.ieltsScore}`, status: 'ok' });
+  } else if (isDocVal(p.toeflScore)) {
+    add('toefl', { label: 'TOEFL', type: 'toefl', color: '#B45309', icon: '📝', source: 'ai', detail: `Score: ${p.toeflScore}`, status: 'ok' });
+  } else if (isDocVal(p.pteScore)) {
+    add('pte', { label: 'PTE Academic', type: 'pte', color: '#B45309', icon: '📝', source: 'ai', detail: `Score: ${p.pteScore}`, status: 'ok' });
+  }
+
+  // Bank statement / financial evidence
+  if (isDocVal(p.financialBalance) || isDocVal(p.financialHolder)) {
+    add('bank_statement', {
+      label: 'Bank Statement', type: 'bank_statement',
+      color: '#059669', icon: '🏦',
+      source: 'ai',
+      detail: p.financialBalance && p.financialBalance !== 'Not found' ? `Balance: ${p.financialBalance}` : (p.financialHolder || null),
+      status: isDocVal(p.financialBalance) ? 'ok' : 'partial',
+    });
+  }
+
+  // Academic / transcript
+  if (isDocVal(p.academicResult) || isDocVal(p.program) || isDocVal(p.university)) {
+    add('transcript', {
+      label: 'Academic Transcript', type: 'transcript',
+      color: '#D97706', icon: '🎓',
+      source: 'ai',
+      detail: p.academicResult && p.academicResult !== 'Not found' ? p.academicResult : (p.program || null),
+      status: isDocVal(p.academicResult) ? 'ok' : 'partial',
+    });
+  }
+
+  // CNIC / National ID
+  if (isDocVal(p.cnicNumber) || isDocVal(p.cnicExpiry)) {
+    add('cnic', {
+      label: 'CNIC / National ID', type: 'cnic',
+      color: '#0284C7', icon: '🪪',
+      source: 'ai',
+      detail: p.cnicNumber && p.cnicNumber !== 'Not found' ? p.cnicNumber : null,
+      status: isDocVal(p.cnicNumber) ? 'ok' : 'partial',
+    });
+  }
+
+  // Offer letters
+  if (Array.isArray(p.offerLetters) && p.offerLetters.length > 0) {
+    p.offerLetters.forEach((o, i) => {
+      if (isDocVal(o.university) || isDocVal(o.status) || isDocVal(o.country)) {
+        add('offer_' + i, {
+          label: 'Offer Letter' + (p.offerLetters.length > 1 ? ` ${i+1}` : ''), type: 'offer_letter',
+          color: '#7C3AED', icon: '✉️',
+          source: 'ai',
+          detail: o.university && o.university !== 'Not found' ? o.university : (o.country || null),
+          status: isDocVal(o.status) ? 'ok' : 'partial',
+        });
+      }
+    });
+  }
+
+  // CAS / Pre-CAS
+  const hasCAS = (Array.isArray(p.casDocuments) && p.casDocuments.some(d => isDocVal(d.casNumber) || isDocVal(d.university)))
+               || isDocVal(p.cas?.cas_number) || isDocVal(p.cas?.university);
+  if (hasCAS) {
+    const casNum = p.casDocuments?.[0]?.casNumber || p.cas?.cas_number || null;
+    add('cas', {
+      label: 'CAS / Pre-CAS', type: 'cas',
+      color: '#0EA5E9', icon: '🏫',
+      source: 'ai',
+      detail: casNum && casNum !== 'Not found' ? casNum : null,
+      status: 'ok',
+    });
+  }
+
+  // ── TIER 2: profileData.detectedDocs (special docs) ──────────────────────────
+  if (Array.isArray(p.detectedDocs)) {
+    p.detectedDocs.forEach((d, i) => {
+      if (!d.type) return;
+      const meta = getDocMeta(d.type);
+      add('special_' + d.type + '_' + i, {
+        label: d.type, type: 'special',
+        color: meta.color, icon: meta.icon,
+        source: 'ai',
+        detail: d.reference || d.date || d.institution || null,
+        status: 'ok',
+      });
+    });
+  }
+
+  // ── TIER 3: Supabase doc_list (fallback for saved cases with no live profileData) ──
+  if (out.size === 0 && Array.isArray(supabaseDocList) && supabaseDocList.length > 0) {
+    supabaseDocList.forEach((d, i) => {
+      const t = d.type || 'other';
+      const label = t === 'passport' ? 'Passport'
+        : t === 'bank_statement' ? 'Bank Statement'
+        : t === 'offer_letter' ? 'Offer Letter'
+        : t === 'ielts' ? 'IELTS' : t === 'pte' ? 'PTE' : t === 'toefl' ? 'TOEFL'
+        : t === 'cnic' ? 'CNIC' : t === 'transcript' ? 'Transcript'
+        : t === 'degree' ? 'Degree'
+        : t.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+      const color = t === 'passport' ? '#1D6BE8' : t === 'bank_statement' ? '#059669'
+        : t === 'offer_letter' ? '#7C3AED' : (t === 'ielts' || t === 'pte' || t === 'toefl') ? '#B45309'
+        : t === 'cnic' ? '#0284C7' : t === 'transcript' || t === 'degree' ? '#D97706' : '#64748B';
+      add('db_' + t + '_' + i, {
+        label, type: t, color, icon: '📄',
+        source: 'db',
+        detail: d.name || null,
+        status: 'ok',
+      });
+    });
+  }
+
+  // ── TIER 4: uploaded docs[] (raw file list, last resort) ─────────────────────
+  if (out.size === 0 && Array.isArray(docs) && docs.length > 0) {
+    docs.forEach((doc, i) => {
+      const t = (docTypes && docTypes[doc.id]) || doc.type || 'other';
+      const label = t === 'passport' ? 'Passport' : t === 'bank_statement' ? 'Bank Statement'
+        : t === 'offer_letter' ? 'Offer Letter' : t === 'ielts' ? 'IELTS'
+        : t === 'pte' ? 'PTE' : t === 'toefl' ? 'TOEFL' : t === 'cnic' ? 'CNIC'
+        : t === 'degree' ? 'Degree / Transcript' : t === 'photo' ? 'Photo' : t === 'other' ? 'Other'
+        : t.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+      const color = t === 'passport' ? '#1D6BE8' : t === 'bank_statement' ? '#059669'
+        : t === 'offer_letter' ? '#7C3AED' : (t === 'ielts' || t === 'pte' || t === 'toefl') ? '#B45309'
+        : t === 'cnic' ? '#0284C7' : t === 'degree' ? '#D97706' : '#64748B';
+      const name = doc.renamed || doc.file?.name || `File ${i+1}`;
+      add('file_' + (doc.id || i), {
+        label, type: t, color, icon: '📄',
+        source: 'file',
+        detail: name,
+        status: 'ok',
+      });
+    });
+  }
+
+  return Array.from(out.values());
+}
+
+function DetectedDocsCard({ profileData }) {
+  const docs = Array.isArray(profileData?.detectedDocs) ? profileData.detectedDocs : [];
+  const mismatches = Array.isArray(profileData?.nameMismatches) ? profileData.nameMismatches : [];
+
+  // Build sidebar items: each doc + a "mismatches" entry if any
+  const allItems = [
+    ...docs.map((doc, i) => ({ kind: "doc", doc, i })),
+    ...(mismatches.length > 0 ? [{ kind: "mismatches" }] : []),
+  ];
+
+  const [activeIdx, setActiveIdx] = useState(0);
+
+  if (allItems.length === 0) return (
+    <div className="all-clear" style={{marginTop:8}}><CheckCircle size={16}/>No special documents detected.</div>
+  );
+
+  const active = allItems[activeIdx] || allItems[0];
+
+  function renderDocDetail(doc) {
+    const meta  = getDocMeta(doc.type);
+    const isTB  = doc.type === "TB Certificate";
+    const color = isTB ? (doc.result === "Clear" ? "#059669" : doc.result ? "#DC2626" : meta.color) : meta.color;
+    const bg    = isTB ? (doc.result === "Clear" ? "rgba(5,150,105,.06)" : doc.result ? "rgba(220,38,38,.06)" : meta.bg) : meta.bg;
+    const bd    = isTB ? (doc.result === "Clear" ? "rgba(5,150,105,.25)" : doc.result ? "rgba(220,38,38,.25)" : meta.bd) : meta.bd;
+    return (
+      <div style={{background:bg,border:`1px solid ${bd}`,borderRadius:"var(--r2)",padding:"14px 14px 12px"}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
+          <span style={{fontSize:20,lineHeight:1}}>{meta.icon}</span>
+          <div>
+            <div style={{fontSize:13,fontWeight:700,color,fontFamily:"var(--fh)"}}>{doc.type}</div>
+            {doc.reference && <div style={{fontSize:10,color:"var(--t3)",fontFamily:"var(--fm)",marginTop:1}}>{doc.reference}</div>}
+          </div>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"6px 12px"}}>
+          {doc.date         && <div><div className="plbl">Date</div><div style={{fontSize:14,fontWeight:600,color:doc.date&&doc.date!=="Not found"?"var(--t1)":"var(--err)"}}>{doc.date}</div></div>}
+          {doc.expiry       && <div><div className="plbl">Expiry</div><div style={{fontSize:14,fontWeight:600,color:doc.expiry&&doc.expiry!=="Not found"?"var(--t1)":"var(--err)"}}>{doc.expiry}</div></div>}
+          {doc.amount       && <div><div className="plbl">Amount</div><div style={{fontSize:14,fontWeight:600,color:doc.amount&&doc.amount!=="Not found"?"var(--t1)":"var(--err)"}}>{doc.amount}</div></div>}
+          {doc.result       && <div><div className="plbl">Result</div><div style={{fontSize:14,fontWeight:700,color}}>{doc.result}</div></div>}
+          {doc.institution  && <div style={{gridColumn:"1/-1"}}><div className="plbl">Institution</div><div style={{fontSize:14,fontWeight:600,color:doc.institution&&doc.institution!=="Not found"?"var(--t1)":"var(--err)"}}>{doc.institution}</div></div>}
+          {doc.from         && <div style={{gridColumn:"1/-1"}}><div className="plbl">Signed By</div><div style={{fontSize:14,fontWeight:600,color:doc.from&&doc.from!=="Not found"?"var(--t1)":"var(--err)"}}>{doc.from}{doc.role ? <span style={{fontWeight:400,color:"var(--t2)",marginLeft:6}}>· {doc.role}</span> : null}</div></div>}
+          {doc.employeeRole && <div style={{gridColumn:"1/-1"}}><div className="plbl">Employee Role</div><div style={{fontSize:14,fontWeight:600,color:doc.employeeRole&&doc.employeeRole!=="Not found"?"var(--t1)":"var(--err)"}}>{doc.employeeRole}{doc.duration ? <span style={{fontWeight:400,color:"var(--t2)",marginLeft:6}}>· {doc.duration}</span> : null}</div></div>}
+          {doc.type==="FRC" && (doc.memberCount || (Array.isArray(doc.members)&&doc.members.length>0)) && (
+            <div style={{gridColumn:"1/-1"}}>
+              <div className="plbl" style={{display:"flex",alignItems:"center",gap:6}}>
+                Family Members
+                <span style={{fontSize:9,fontWeight:700,background:"rgba(124,58,237,.1)",color:"#7c3aed",borderRadius:3,padding:"1px 5px"}}>
+                  {doc.memberCount||(Array.isArray(doc.members)?doc.members.length:0)} listed
+                </span>
+              </div>
+              {Array.isArray(doc.members)&&doc.members.length>0&&(
+                <div style={{display:"flex",flexDirection:"column",gap:3,marginTop:4}}>
+                  {doc.members.map((m,mi)=>(
+                    <div key={mi} style={{display:"flex",alignItems:"center",gap:8,padding:"4px 8px",background:"var(--bg)",border:"1px solid var(--bd)",borderRadius:"var(--r1)",fontSize:13}}>
+                      <span style={{fontWeight:600,color:"var(--t1)",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{m.name||"Unknown"}</span>
+                      {m.relation&&<span style={{fontSize:12,color:"var(--t3)",fontFamily:"var(--fm)",flexShrink:0}}>{m.relation}</span>}
+                      {m.cnic&&<span style={{fontSize:12,color:"var(--t3)",fontFamily:"var(--fm)",flexShrink:0}}>{m.cnic}</span>}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          {doc.type==="MRC"&&doc.husbandName&&<div><div className="plbl">Husband</div><div style={{fontSize:14,fontWeight:600,color:doc.husbandName&&doc.husbandName!=="Not found"?"var(--t1)":"var(--err)"}}>{doc.husbandName}</div></div>}
+          {doc.type==="MRC"&&doc.wifeName&&<div><div className="plbl">Wife</div><div style={{fontSize:14,fontWeight:600,color:doc.wifeName&&doc.wifeName!=="Not found"?"var(--t1)":"var(--err)"}}>{doc.wifeName}</div></div>}
+          {doc.notes&&<div style={{gridColumn:"1/-1"}}><div className="plbl">Notes</div><div style={{fontSize:13,color:doc.notes&&doc.notes!=="Not found"?"var(--t2)":"var(--err)",fontFamily:"var(--fu)",lineHeight:1.55}}>{doc.notes}</div></div>}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{display:"flex",gap:0,minHeight:200,border:"1px solid var(--bd)",borderRadius:"var(--r2)",overflow:"hidden",background:"var(--bg)"}}>
+      {/* ── Mini sidebar ── */}
+      <div style={{width:136,flexShrink:0,borderRight:"1px solid var(--bd)",background:"var(--s2)",display:"flex",flexDirection:"column",overflowY:"auto"}}>
+        {docs.map((doc, i) => {
+          const meta = getDocMeta(doc.type);
+          const isTB = doc.type === "TB Certificate";
+          const accentColor = isTB ? (doc.result === "Clear" ? "#059669" : doc.result ? "#DC2626" : meta.color) : meta.color;
+          const isActive = activeIdx === i;
+          return (
+            <button key={i} onClick={()=>setActiveIdx(i)}
+              style={{
+                display:"flex",alignItems:"center",gap:7,
+                padding:"9px 10px",border:"none",cursor:"pointer",textAlign:"left",
+                background: isActive ? "var(--bg)" : "transparent",
+                borderLeft: isActive ? `3px solid ${accentColor}` : "3px solid transparent",
+                borderBottom:"1px solid var(--bd)",
+                transition:"background 120ms",
+              }}>
+              <span style={{fontSize:15,lineHeight:1,flexShrink:0}}>{meta.icon}</span>
+              <div style={{minWidth:0}}>
+                <div style={{fontSize:10,fontWeight:700,color: isActive ? accentColor : "var(--t1)",fontFamily:"var(--fh)",lineHeight:1.3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:88}}>{doc.type}</div>
+                {doc.reference && <div style={{fontSize:9,color:"var(--t3)",fontFamily:"var(--fm)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:88,marginTop:1}}>{doc.reference}</div>}
+              </div>
+            </button>
+          );
+        })}
+        {mismatches.length > 0 && (
+          <button onClick={()=>setActiveIdx(docs.length)}
+            style={{
+              display:"flex",alignItems:"center",gap:7,
+              padding:"9px 10px",border:"none",cursor:"pointer",textAlign:"left",
+              background: activeIdx === docs.length ? "var(--bg)" : "transparent",
+              borderLeft: activeIdx === docs.length ? "3px solid #DC2626" : "3px solid transparent",
+              borderBottom:"1px solid var(--bd)",
+            }}>
+            <span style={{fontSize:14,lineHeight:1,flexShrink:0}}>⚠️</span>
+            <div style={{fontSize:10,fontWeight:700,color: activeIdx===docs.length ? "#DC2626" : "var(--t1)",fontFamily:"var(--fh)",lineHeight:1.3}}>
+              Name Mismatches
+              <div style={{fontSize:9,fontWeight:400,color:"var(--t3)",fontFamily:"var(--fm)",marginTop:1}}>{mismatches.length} found</div>
+            </div>
+          </button>
+        )}
+      </div>
+
+      {/* ── Detail panel ── */}
+      <div style={{flex:1,padding:12,overflowY:"auto",minWidth:0}}>
+        {active.kind === "doc" && renderDocDetail(active.doc)}
+        {active.kind === "mismatches" && (
+          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+            <div style={{fontSize:11,fontWeight:700,color:"var(--err)",textTransform:"uppercase",letterSpacing:".06em",marginBottom:4}}>Name Mismatches</div>
+            {mismatches.map((m,i)=>(
+              <div key={i} style={{background:"rgba(220,38,38,.05)",border:"1px solid rgba(220,38,38,.2)",borderRadius:"var(--r1)",padding:"8px 10px"}}>
+                <div style={{fontSize:10,fontWeight:700,color:"var(--err)",textTransform:"uppercase",letterSpacing:".06em",marginBottom:2}}>{m.documentName||m.doc||"Unknown Document"}</div>
+                <div style={{fontSize:12,color:"var(--t1)",fontWeight:600,marginBottom:2}}>Found: "{m.nameFound}"</div>
+                <div style={{fontSize:11,color:"var(--t2)",fontFamily:"var(--fm)"}}>{m.issue}</div>
+              </div>
+            ))}
+            <div style={{display:"flex",alignItems:"flex-start",gap:7,padding:"7px 10px",background:"var(--warng)",border:"1px solid rgba(180,83,9,.2)",borderRadius:"var(--r1)",fontSize:11,color:"var(--warn)",fontFamily:"var(--fm)",lineHeight:1.5}}>
+              <span style={{flexShrink:0}}>⚠️</span>
+              <span>Name mismatches must be resolved before visa submission — a statutory declaration or affidavit may be required.</span>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
 const INTAKE_SEASONS = ["Fall (Aug/Sept)", "Spring (Jan)", "Summer (May)", "Annual"];
 const INTAKE_YEARS   = ["2026", "2027", "2028"];
 const LEAD_STATUSES  = [
@@ -3644,15 +3027,41 @@ function NotesCard({
   applicationTargets, setApplicationTargets,
   requirementsData, profileData, preferredOfferIndex,
   orgSession,
+  orgMembers = [],
 }) {
   const [collapsed, setCollapsed] = useState(false);
-  const [showSuggestions, setShowSuggestions] = useState(false);
   const [cardCollapsed, setCardCollapsed] = useState({});
+  // Notes ledger: array of {text, ts} entries parsed from the notes string.
+  // Format: entries separated by "\n\n---\n" with a timestamp header line.
+  const NOTE_SEP = "\n\n---\n";
+  const NOTE_TS_RE = /^\[(.+?)\]\n/;
 
-  const existingNames = [...new Set((cases||[]).map(c => c.counsellorName).filter(Boolean))];
-  const suggestions = counsellorName.trim()
-    ? existingNames.filter(n => n.toLowerCase().includes(counsellorName.toLowerCase()) && n !== counsellorName)
-    : [];
+  function parseNoteEntries(raw) {
+    if (!raw || !raw.trim()) return [];
+    return raw.split(NOTE_SEP).map(chunk => {
+      const m = chunk.match(NOTE_TS_RE);
+      if (m) return { ts: m[1], text: chunk.slice(m[0].length) };
+      return { ts: null, text: chunk };
+    }).filter(e => e.text.trim());
+  }
+
+  function buildNotesString(entries) {
+    return entries.map(e => (e.ts ? `[${e.ts}]\n${e.text}` : e.text)).join(NOTE_SEP);
+  }
+
+  const noteEntries = parseNoteEntries(notes);
+  const [draftNote, setDraftNote] = useState("");
+
+  function commitDraft() {
+    if (!draftNote.trim()) return;
+    const ts = new Date().toLocaleString("en-GB", { day:"2-digit", month:"short", year:"numeric", hour:"2-digit", minute:"2-digit" });
+    const newEntry = { ts, text: draftNote.trim() };
+    const updated = [newEntry, ...noteEntries];
+    setNotes(buildNotesString(updated));
+    setDraftNote("");
+  }
+
+  const memberNames = orgMembers.map(m => m.full_name).filter(Boolean);
 
   function updateTarget(idx, newTarget) {
     setApplicationTargets(prev => prev.map((t, i) => i === idx ? newTarget : t));
@@ -3670,6 +3079,7 @@ function NotesCard({
     setCardCollapsed(prev => ({ ...prev, [idx]: !prev[idx] }));
   }
 
+  const [notesTab, setNotesTab] = useState("notes");
   const hasAnyTarget = applicationTargets.length > 0;
   const studentName  = profileData?.fullName && profileData.fullName !== "Not found" ? profileData.fullName : null;
 
@@ -3688,85 +3098,105 @@ function NotesCard({
   };
   const sc = STATUS_COLOR[leadStatus] || STATUS_COLOR["None"];
 
+  // Pipeline stages
+  const PIPELINE = ["New Lead","Ready to Apply","Application Started","Application Submitted","Application Accepted","Visa"];
+  const PIPELINE_LABELS = ["Lead","Ready","Started","Submitted","Accepted","Visa"];
+  function pipelineIdx() {
+    if (!leadStatus || leadStatus === "None") return -1;
+    if (leadStatus === "New Lead" || leadStatus === "Follow up") return 0;
+    if (leadStatus === "Ready to Apply") return 1;
+    if (leadStatus === "Application Started" || leadStatus === "Application Paid") return 2;
+    if (leadStatus === "Application Submitted") return 3;
+    if (leadStatus === "Application Accepted") return 4;
+    if (leadStatus === "Ready for Visa" || leadStatus === "Done") return 5;
+    return -1;
+  }
+  const pIdx = pipelineIdx();
+
   return (
-    <div className="rc rc-profile">
-      <button className={`rc-hdr--btn rc-hdr--blue${collapsed ? " collapsed" : ""}`} onClick={() => setCollapsed(c => !c)}>
-        <div className="rc-ico"><User size={14} color="#fff"/></div>
-        <span className="rc-ttl">Counsellor Panel</span>
+    <div className="rc rc-profile vl-counsellor-card">
+      {/* ── Header ── */}
+      <div className="vl-cp-hdr">
+        <div className="rc-ico" style={{background:"rgba(255,255,255,.18)",borderRadius:8,width:28,height:28,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+          <User size={14} color="#fff"/>
+        </div>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontSize:13,fontWeight:700,color:"#fff",fontFamily:"var(--fh)"}}>Counsellor Panel</div>
+          {activeCaseSerial && <div style={{fontSize:10,fontFamily:"var(--fm)",color:"rgba(255,255,255,0.65)",marginTop:1}}>{activeCaseSerial}</div>}
+        </div>
         {leadStatus && leadStatus !== "None" && (
           <span style={{
-            display:"inline-flex", alignItems:"center", gap:4,
-            fontSize:9, fontWeight:700, letterSpacing:".05em", textTransform:"uppercase",
-            background: sc.bg, color: sc.color, border:`1px solid ${sc.bd}`,
-            borderRadius:4, padding:"2px 7px", flexShrink:0,
+            display:"inline-flex",alignItems:"center",gap:4,
+            fontSize:9,fontWeight:700,letterSpacing:".05em",textTransform:"uppercase",
+            background:sc.bg,color:sc.color,border:`1px solid ${sc.bd}`,
+            borderRadius:4,padding:"2px 7px",flexShrink:0,
           }}>{leadStatus}</span>
         )}
-        {hasAnyTarget && (
-          <span className="badge b-ok" style={{ gap: 4 }}>
-            <GraduationCap size={10}/>
-            {applicationTargets.length} Target{applicationTargets.length !== 1 ? "s" : ""}
-          </span>
-        )}
-        <ChevronDown size={14} className={`rc-collapse-chevron${collapsed ? "" : " open"}`}/>
-      </button>
+        <button className={`rc-hdr--btn-collapse`} onClick={() => setCollapsed(c => !c)}
+          style={{background:"none",border:"none",cursor:"pointer",padding:4,color:"rgba(255,255,255,0.8)",display:"flex",alignItems:"center",marginLeft:4}}>
+          <ChevronDown size={14} style={{transition:"transform 200ms",transform:collapsed?"none":"rotate(180deg)"}}/>
+        </button>
+      </div>
 
-      <div className="rc-body" style={collapsed ? { display: "none" } : {}}>
+      <div style={collapsed ? { display: "none" } : {}}>
 
-        {/* ── Static info row: student + case ID ── */}
-        {(studentName || activeCaseSerial) && (
-          <div style={{
-            display:"flex", alignItems:"center", gap:10, flexWrap:"wrap",
-            padding:"9px 12px", marginBottom:14,
-            background:"var(--s2)", border:"1px solid var(--bd)",
-            borderRadius:"var(--r2)",
-          }}>
-            {studentName && (
-              <div style={{flex:1, minWidth:0}}>
-                <div style={{fontSize:10, fontWeight:700, color:"var(--t3)", textTransform:"uppercase", letterSpacing:".06em", marginBottom:2}}>Student</div>
-                <div style={{fontSize:13, fontWeight:700, color:"var(--t1)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{studentName}</div>
-              </div>
-            )}
-            {activeCaseSerial && (
-              <div style={{flexShrink:0}}>
-                <div style={{fontSize:10, fontWeight:700, color:"var(--t3)", textTransform:"uppercase", letterSpacing:".06em", marginBottom:2}}>Case ID</div>
-                <div style={{fontSize:11, fontWeight:600, color:"var(--p)", fontFamily:"var(--fm)", letterSpacing:".03em"}}>{activeCaseSerial}</div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ── Two-column row: Counsellor Name + Lead Status ── */}
-        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:16 }}>
-
-          {/* Counsellor Name */}
-          <div style={{ position: "relative" }}>
-            <label className="uni-select-lbl">Counsellor Name</label>
-            <input className="uni-select"
-              style={{ background: activeCaseId ? "var(--s3)" : "", cursor: activeCaseId ? "not-allowed" : "", opacity: activeCaseId ? 0.7 : 1 }}
-              placeholder={orgSession?.counsellor_name || "e.g. Sara Ahmed"}
-              value={counsellorName}
-              readOnly={!!activeCaseId}
-              onChange={e => { if (!activeCaseId) { setCounsellorName(e.target.value); setShowSuggestions(true); } }}
-              onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
-              onFocus={() => { if (!activeCaseId) setShowSuggestions(true); }}/>
-            {activeCaseId && (
-              <div style={{ fontSize: 10, color: "var(--t3)", marginTop: 3, fontFamily: "var(--fm)" }}>🔒 Locked — saved</div>
-            )}
-            {showSuggestions && suggestions.length > 0 && (
-              <div style={{ position: "absolute", top: "100%", left: 0, right: 0, background: "var(--s1)", border: "1px solid var(--bd)", borderRadius: "var(--r1)", zIndex: 100, boxShadow: "var(--sh2)", marginTop: 2 }}>
-                {suggestions.map(name => (
-                  <div key={name} onMouseDown={() => { setCounsellorName(name); setShowSuggestions(false); }}
-                    style={{ padding: "7px 12px", fontSize: 12, fontFamily: "var(--fu)", cursor: "pointer", borderBottom: "1px solid var(--bd)", color: "var(--t1)" }}
-                    onMouseEnter={e => e.currentTarget.style.background = "var(--s2)"}
-                    onMouseLeave={e => e.currentTarget.style.background = ""}>
-                    {name}
+        {/* ── Pipeline timeline ── */}
+        <div className="vl-pipeline" style={{padding:"12px 16px 0"}}>
+          <div className="vl-pipeline-track">
+            {PIPELINE_LABELS.map((label, i) => {
+              const done   = i < pIdx;
+              const active = i === pIdx;
+              return (
+                <div key={i} className="vl-pipeline-step">
+                  {i < PIPELINE_LABELS.length - 1 && (
+                    <div className={`vl-pipeline-line${done || active ? " done" : ""}`}/>
+                  )}
+                  <div className={`vl-pipeline-dot${done ? " done" : active ? " active" : ""}`}>
+                    {done ? <Check size={8}/> : active ? <Dot size={10}/> : null}
                   </div>
-                ))}
+                  <div className={`vl-pipeline-label${active ? " active" : ""}`}>{label}</div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* ── Static info row ── */}
+        {(studentName || activeCaseSerial) && (
+          <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",padding:"10px 16px 0"}}>
+            {studentName && (
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontSize:10,fontWeight:700,color:"var(--t3)",textTransform:"uppercase",letterSpacing:".06em",marginBottom:1}}>Student</div>
+                <div style={{fontSize:12,fontWeight:700,color:"var(--t1)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{studentName}</div>
               </div>
             )}
           </div>
+        )}
 
-          {/* Lead Status */}
+        {/* ── Counsellor + Lead Status row ── */}
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,padding:"10px 16px 0"}}>
+          <div style={{ position: "relative" }}>
+            <label className="uni-select-lbl">Counsellor</label>
+            {activeCaseId ? (
+              <>
+                <div className="uni-select" style={{ background: "var(--s3)", opacity: 0.7, cursor: "not-allowed", display: "flex", alignItems: "center" }}>
+                  {counsellorName || "—"}
+                </div>
+                <div style={{ fontSize: 10, color: "var(--t3)", marginTop: 3, fontFamily: "var(--fm)" }}>🔒 Locked — saved</div>
+              </>
+            ) : (
+              <select
+                className="uni-select"
+                value={counsellorName}
+                onChange={e => setCounsellorName(e.target.value)}
+              >
+                <option value="">Select counsellor…</option>
+                {memberNames.map(name => (
+                  <option key={name} value={name}>{name}</option>
+                ))}
+              </select>
+            )}
+          </div>
           <div>
             <label className="uni-select-lbl">Lead Status</label>
             <select className="uni-select" value={leadStatus} onChange={e => setLeadStatus(e.target.value)}
@@ -3778,79 +3208,129 @@ function NotesCard({
           </div>
         </div>
 
-        {/* ── Application Targets section header ── */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <GraduationCap size={13} color="var(--p)"/>
-            <span style={{ fontFamily: "var(--fh)", fontSize: 11, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--t1)" }}>Application Targets</span>
-            <span style={{ fontFamily: "var(--fm)", fontSize: 10, color: "var(--t3)" }}>({applicationTargets.length}/4)</span>
-          </div>
-          {applicationTargets.length < 4 && (
-            <button onClick={addTarget} style={{
-              display: "flex", alignItems: "center", gap: 4,
-              fontSize: 11, fontFamily: "var(--fu)", fontWeight: 600,
-              color: "var(--p)", background: "var(--pg)", border: "1px solid rgba(29,107,232,.2)",
-              borderRadius: "var(--r1)", padding: "4px 10px", cursor: "pointer",
-              transition: "all var(--fast)",
-            }}
-            onMouseEnter={e => e.currentTarget.style.background = "rgba(29,107,232,.14)"}
-            onMouseLeave={e => e.currentTarget.style.background = "var(--pg)"}>
-              <Plus size={11}/>Add Target
-            </button>
-          )}
+        {/* ── Tab strip: Notes / Targets — no more Save tab ── */}
+        <div className="vl-cp-tabs">
+          <button className={`vl-cptab${notesTab==="notes"?" on":""}`} onClick={()=>setNotesTab("notes")}>
+            Notes
+          </button>
+          <button className={`vl-cptab${notesTab==="targets"?" on":""}`} onClick={()=>setNotesTab("targets")}>
+            Targets
+            {hasAnyTarget && <span className="vl-cptab-count">{applicationTargets.length}</span>}
+          </button>
         </div>
 
-        {/* ── Target cards ── */}
-        {applicationTargets.length === 0 ? (
-          <div style={{
-            border: "1.5px dashed var(--bd)", borderRadius: "var(--r2)",
-            padding: "20px 16px", textAlign: "center", marginBottom: 14,
-            background: "var(--s2)",
-          }}>
-            <GraduationCap size={22} color="var(--t3)" style={{ margin: "0 auto 8px" }}/>
-            <div style={{ fontSize: 12, fontFamily: "var(--fu)", color: "var(--t2)", fontWeight: 600, marginBottom: 4 }}>No application targets yet</div>
-            <div style={{ fontSize: 11, color: "var(--t3)", fontFamily: "var(--fu)", marginBottom: 12 }}>Add up to 4 countries &amp; universities this student is applying to</div>
-            <button onClick={addTarget} style={{
-              display: "inline-flex", alignItems: "center", gap: 5,
-              fontSize: 12, fontFamily: "var(--fu)", fontWeight: 600,
-              color: "#fff", background: "var(--p)", border: "none",
-              borderRadius: "var(--r1)", padding: "6px 14px", cursor: "pointer",
-            }}>
-              <Plus size={12}/>Add First Target
-            </button>
-          </div>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
-            {applicationTargets.map((target, idx) => (
-              <TargetCard
-                key={idx}
-                target={target}
-                idx={idx}
-                total={applicationTargets.length}
-                requirementsData={requirementsData}
-                profileData={profileData}
-                preferredOfferIndex={preferredOfferIndex}
-                onChange={t => updateTarget(idx, t)}
-                onRemove={() => removeTarget(idx)}
-                collapsed={!!cardCollapsed[idx]}
-                onToggleCollapse={() => toggleCard(idx)}
-              />
-            ))}
+        {/* ── Notes tab — append-only ledger ── */}
+        {notesTab === "notes" && (
+          <div style={{padding:"12px 16px 0"}}>
+            {/* Draft entry input */}
+            <textarea
+              className="notes-area"
+              placeholder="Add a new note…"
+              value={draftNote}
+              onChange={e => setDraftNote(e.target.value)}
+              style={{marginBottom:6}}
+            />
+            <button
+              onClick={commitDraft}
+              disabled={!draftNote.trim()}
+              style={{
+                display:"flex",alignItems:"center",justifyContent:"center",gap:6,
+                width:"100%",padding:"7px 0",marginBottom:10,
+                fontSize:12,fontWeight:700,fontFamily:"var(--fh)",
+                background: draftNote.trim() ? "var(--p)" : "var(--s3)",
+                color: draftNote.trim() ? "#fff" : "var(--t3)",
+                border:"none",borderRadius:"var(--r1)",cursor: draftNote.trim() ? "pointer" : "not-allowed",
+                transition:"background 150ms",
+              }}
+            ><Plus size={12}/>Add Note</button>
+
+            {/* Read-only history ledger */}
+            {noteEntries.length > 0 && (
+              <div style={{display:"flex",flexDirection:"column",gap:6,maxHeight:260,overflowY:"auto",paddingBottom:4}}>
+                <div style={{fontSize:9,fontWeight:700,color:"var(--t3)",textTransform:"uppercase",letterSpacing:".07em",marginBottom:2}}>Note History</div>
+                {noteEntries.map((entry,i)=>(
+                  <div key={i} style={{background:"var(--s2)",border:"1px solid var(--bd)",borderRadius:"var(--r1)",padding:"8px 10px"}}>
+                    {entry.ts && (
+                      <div style={{fontSize:9,color:"var(--t3)",fontFamily:"var(--fm)",marginBottom:4,display:"flex",alignItems:"center",gap:4}}>
+                        <Clock size={9}/>{entry.ts}
+                      </div>
+                    )}
+                    <div style={{fontSize:11,color:"var(--t1)",fontFamily:"var(--fu)",lineHeight:1.5,whiteSpace:"pre-wrap"}}>{entry.text}</div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
-        {/* ── Divider ── */}
-        <div style={{ height: 1, background: "var(--bd)", margin: "2px 0 14px" }}/>
+        {/* ── Targets tab ── */}
+        {notesTab === "targets" && (
+          <div style={{padding:"12px 16px"}}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <GraduationCap size={13} color="var(--p)"/>
+                <span style={{ fontFamily: "var(--fh)", fontSize: 11, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--t1)" }}>Application Targets</span>
+                <span style={{ fontFamily: "var(--fm)", fontSize: 10, color: "var(--t3)" }}>({applicationTargets.length}/4)</span>
+              </div>
+              {applicationTargets.length < 4 && (
+                <button onClick={addTarget} style={{
+                  display: "flex", alignItems: "center", gap: 4,
+                  fontSize: 11, fontFamily: "var(--fu)", fontWeight: 600,
+                  color: "var(--p)", background: "var(--pg)", border: "1px solid rgba(29,107,232,.2)",
+                  borderRadius: "var(--r1)", padding: "4px 10px", cursor: "pointer",
+                }}><Plus size={11}/>Add Target</button>
+              )}
+            </div>
+            {applicationTargets.length === 0 ? (
+              <div style={{ border: "1.5px dashed var(--bd)", borderRadius: "var(--r2)", padding: "20px 16px", textAlign: "center", background: "var(--s2)" }}>
+                <GraduationCap size={22} color="var(--t3)" style={{ margin: "0 auto 8px" }}/>
+                <div style={{ fontSize: 12, fontFamily: "var(--fu)", color: "var(--t2)", fontWeight: 600, marginBottom: 4 }}>No application targets yet</div>
+                <div style={{ fontSize: 11, color: "var(--t3)", fontFamily: "var(--fu)", marginBottom: 12 }}>Add up to 4 countries &amp; universities this student is applying to</div>
+                <button onClick={addTarget} style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, fontFamily: "var(--fu)", fontWeight: 600, color: "#fff", background: "var(--p)", border: "none", borderRadius: "var(--r1)", padding: "6px 14px", cursor: "pointer" }}>
+                  <Plus size={12}/>Add First Target
+                </button>
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {applicationTargets.map((target, idx) => (
+                  <TargetCard
+                    key={idx} target={target} idx={idx} total={applicationTargets.length}
+                    requirementsData={requirementsData} profileData={profileData}
+                    preferredOfferIndex={preferredOfferIndex}
+                    onChange={t => updateTarget(idx, t)} onRemove={() => removeTarget(idx)}
+                    collapsed={!!cardCollapsed[idx]} onToggleCollapse={() => toggleCard(idx)}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
-        {/* ── Notes textarea ── */}
-        <label className="uni-select-lbl" style={{ marginBottom: 6, display: "block" }}>Follow-up Notes</label>
-        <textarea className="notes-area" placeholder="Follow-up actions, concerns, next steps…" value={notes} onChange={e => setNotes(e.target.value)}/>
-        <div className="notes-acts">
-          {savedMsg && <span className="saved-msg"><Check size={12}/>{savedMsg}</span>}
-          <div className="notes-sp"/>
-          <button className="btn-o" onClick={onSaveCase}><FolderOpen size={13}/>Save to History</button>
+        {/* ── Permanent Save button — always visible below divider ── */}
+        <div style={{borderTop:"1px solid var(--bd)",padding:"12px 16px 14px",marginTop:4}}>
+          {savedMsg && (
+            <div style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:"var(--ok)",fontFamily:"var(--fm)",marginBottom:8}}>
+              <Check size={12}/>{savedMsg}
+            </div>
+          )}
+          <button
+            onClick={onSaveCase}
+            style={{
+              display:"flex",alignItems:"center",justifyContent:"center",gap:7,
+              width:"100%",padding:"9px 0",
+              fontSize:12,fontWeight:700,fontFamily:"var(--fh)",letterSpacing:".04em",
+              background:"#3B0764",color:"#fff",
+              border:"none",borderRadius:"var(--r1)",cursor:"pointer",
+              transition:"opacity 150ms",
+            }}
+            onMouseEnter={e=>e.currentTarget.style.opacity=".85"}
+            onMouseLeave={e=>e.currentTarget.style.opacity="1"}
+          >
+            <Save size={13}/>Save to History
+          </button>
         </div>
-      </div>
+
+      </div>{/* end !collapsed */}
     </div>
   );
 }
@@ -3870,339 +3350,7 @@ function Skeleton() {
 }
 
 /* ─── CASE HISTORY ───────────────────────────────────────────────── */
-const CASE_PAGE_SIZE = 10;
-
-function CaseHistory({ onLoad, onDelete, onRenameCounsellor, onExpandCase, refreshKey }) {
-  const [exp, setExp] = useState(null);
-  const [expandedData, setExpandedData] = useState({});
-  const [histCases, setHistCases] = useState([]);
-  const [histTotal, setHistTotal] = useState(0);
-  const [histPage, setHistPage] = useState(0);
-  const [search, setSearch] = useState("");
-  const [searchTimer, setSearchTimer] = useState(null);
-  const [loadingHist, setLoadingHist] = useState(false);
-  const [counsellorFilter, setCounsellorFilter] = useState("All");
-  const [renaming, setRenaming] = useState(false);
-  const [renameVal, setRenameVal] = useState("");
-
-  const totalPages = Math.max(1, Math.ceil(histTotal / CASE_PAGE_SIZE));
-
-  // Load a specific page from Supabase (replaces current 10 rows)
-  async function loadPage(page) {
-    setLoadingHist(true);
-    setExp(null);
-    let rows;
-    if (page === 0) {
-      rows = await loadCasesFromSupabase();           // page 0 uses existing helper
-    } else {
-      const { cases: r } = await loadMoreCases(page); // page 1+ uses offset helper
-      rows = r;
-    }
-    setHistCases(rows);
-    setHistPage(page);
-    setLoadingHist(false);
-  }
-
-  // Load first page on mount and whenever refreshKey changes (e.g. after a save/delete)
-  useEffect(() => {
-    (async () => {
-      setLoadingHist(true);
-      const rows = await loadCasesFromSupabase();
-      const total = await countCasesInSupabase();
-      setHistCases(rows);
-      setHistTotal(total);
-      setHistPage(0);
-      setSearch("");
-      setLoadingHist(false);
-    })();
-  }, [refreshKey]);
-
-  const counsellorOptions = ["All", ...new Set(histCases.map(c => c.counsellorName).filter(Boolean))];
-
-  async function handleRename() {
-    if (!renameVal.trim() || counsellorFilter === "All") return;
-    await onRenameCounsellor(counsellorFilter, renameVal.trim());
-    setCounsellorFilter("All");
-    setRenaming(false);
-    setRenameVal("");
-    const rows = await loadCasesFromSupabase();
-    setHistCases(rows);
-  }
-
-  function handleSearchChange(e) {
-    const val = e.target.value;
-    setSearch(val);
-    if (searchTimer) clearTimeout(searchTimer);
-    setSearchTimer(setTimeout(() => runSearch(val), 400));
-  }
-
-  async function runSearch(term) {
-    setLoadingHist(true);
-    // Reset counsellor filter when searching — search is cross-counsellor
-    setCounsellorFilter("All");
-    if (!term.trim()) {
-      const rows = await loadCasesFromSupabase();
-      const total = await countCasesInSupabase();
-      setHistCases(rows);
-      setHistTotal(total);
-      setHistPage(0);
-    } else {
-      const found = await searchCases(term);
-      setHistCases(found);
-      setHistTotal(found.length);
-      setHistPage(0);
-    }
-    setLoadingHist(false);
-  }
-
-  async function handleClearSearch() {
-    setSearch("");
-    // Also reset counsellor filter to show all cases
-    setCounsellorFilter("All");
-    setLoadingHist(true);
-    const rows = await loadCasesFromSupabase();
-    const total = await countCasesInSupabase();
-    setHistCases(rows);
-    setHistTotal(total);
-    setHistPage(0);
-    setLoadingHist(false);
-  }
-
-  async function handleDelete(id) {
-    await onDelete(id);
-    // Reload current page so count and rows stay consistent
-    const newTotal = await countCasesInSupabase();
-    setHistTotal(newTotal);
-    const newTotalPages = Math.max(1, Math.ceil(newTotal / CASE_PAGE_SIZE));
-    const targetPage = histPage >= newTotalPages ? Math.max(0, newTotalPages - 1) : histPage;
-    await loadPage(targetPage);
-  }
-
-  // Client-side counsellor filter
-  const filtered = histCases.filter(c => {
-    if (counsellorFilter === "All") return true;
-    return c.counsellorName === counsellorFilter;
-  });
-
-  return (
-    <div style={{width:"100%"}}>
-      <div className="rc rc-profile" style={{marginBottom:16,padding:"14px 16px"}}>
-        <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
-          <div style={{flex:1,minWidth:180}}>
-            <div style={{fontSize:11,color:"var(--t3)",marginBottom:4,fontWeight:600,textTransform:"uppercase",letterSpacing:".05em"}}>Filter by Counsellor</div>
-            <div style={{display:"flex",gap:6,alignItems:"center"}}>
-              <select
-                className="notes-input"
-                style={{flex:1,fontSize:13}}
-                value={counsellorFilter}
-                onChange={e => { setCounsellorFilter(e.target.value); setRenaming(false); setRenameVal(""); }}
-              >
-                {counsellorOptions.map(name => (
-                  <option key={name} value={name}>{name}</option>
-                ))}
-              </select>
-              {counsellorFilter !== "All" && !renaming && (
-                <button className="btn-s" style={{whiteSpace:"nowrap"}} onClick={() => { setRenaming(true); setRenameVal(counsellorFilter); }}>
-                  ✏️ Rename
-                </button>
-              )}
-            </div>
-            {renaming && (
-              <div style={{display:"flex",gap:6,marginTop:6}}>
-                <input
-                  className="notes-input"
-                  style={{flex:1,fontSize:13}}
-                  value={renameVal}
-                  onChange={e => setRenameVal(e.target.value)}
-                  placeholder="New name…"
-                />
-                <button className="btn-s" onClick={handleRename}>✓</button>
-                <button className="btn-s" onClick={() => { setRenaming(false); setRenameVal(""); }}>✕</button>
-              </div>
-            )}
-          </div>
-          <div style={{flex:2,minWidth:200}}>
-            <div style={{fontSize:11,color:"var(--t3)",marginBottom:4,fontWeight:600,textTransform:"uppercase",letterSpacing:".05em"}}>Search Cases</div>
-            <div style={{position:"relative",display:"flex",gap:6,alignItems:"center"}}>
-              <div style={{position:"relative",flex:1}}>
-                <Search size={13} style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",color:"var(--t3)",pointerEvents:"none"}}/>
-                <input
-                  className="notes-input"
-                  style={{width:"100%",fontSize:13,paddingLeft:30,paddingRight:search?28:10}}
-                  placeholder="Search by name, case ID, counsellor…"
-                  value={search}
-                  onChange={handleSearchChange}
-                />
-                {search && (
-                  <button
-                    onClick={handleClearSearch}
-                    title="Clear search"
-                    style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",cursor:"pointer",color:"var(--t3)",display:"flex",alignItems:"center",padding:0,lineHeight:1}}
-                  ><X size={13}/></button>
-                )}
-              </div>
-              {search && (
-                <button className="btn-s" onClick={handleClearSearch} style={{whiteSpace:"nowrap",flexShrink:0}}>
-                  Clear
-                </button>
-              )}
-            </div>
-            {loadingHist && <div style={{fontSize:10,color:"var(--t3)",fontFamily:"var(--fm)",marginTop:4,display:"flex",alignItems:"center",gap:4}}><Loader2 size={10} style={{animation:"spin .7s linear infinite"}}/>Searching…</div>}
-          </div>
-        </div>
-      </div>
-
-      {!filtered.length ? (
-        <div className="no-cases">
-          <FolderOpen size={36} color="#94A3B8" style={{margin:"0 auto 14px"}}/>
-          <div style={{fontSize:"1.1rem",fontWeight:700,color:"var(--t2)",marginBottom:8}}>
-            {histCases.length ? "No cases match your search" : "No cases saved yet"}
-          </div>
-          <div style={{fontSize:12,color:"var(--t3)",fontFamily:"var(--fm)"}}>
-            {histCases.length ? "Try a different search term" : "Analyse documents → click \"Save to History\""}
-          </div>
-        </div>
-      ) : (
-        <>
-        <div className="history">
-          {filtered.map(c => {
-            const profile = c.profile || c.results?.studentProfile || {};
-            const score = c.overallScore || c.results?.eligibility?.overallScore || 0;
-            const flags = c.results?.redFlags?.length || 0;
-            const country = c.targetCountry || profile.targetCountry || '—';
-            const offers = Array.isArray(profile.offerLetters) ? profile.offerLetters : [];
-            const offerCountry = offers[0]?.country || country;
-            const displayName = profile.fullName || c.studentName || c.student_name || 'Unknown Student';
-            return (
-              <div key={c.id} className="case-card">
-                <div className="case-hdr" onClick={async () => { const next = exp === c.id ? null : c.id; setExp(next); if (next && c._summaryOnly && !expandedData[c.id] && onExpandCase) { const full = await onExpandCase(c.id); if (full) setExpandedData(prev => ({...prev, [c.id]: full})); } }} role="button" tabIndex={0} onKeyDown={async e => { if (e.key === "Enter") { const next = exp === c.id ? null : c.id; setExp(next); if (next && c._summaryOnly && !expandedData[c.id] && onExpandCase) { const full = await onExpandCase(c.id); if (full) setExpandedData(prev => ({...prev, [c.id]: full})); } } }}>
-                  <div className="case-av"><User size={18}/></div>
-                  <div className="case-info">
-                    <div className="case-name" style={{display:"flex",alignItems:"center",gap:7,flexWrap:"wrap"}}>
-                      {displayName}
-                      {c.caseSerial && (
-                        <span style={{
-                          fontSize:"0.68rem",fontFamily:"var(--fm)",
-                          background:"var(--bd)",color:"var(--t2)",
-                          padding:"1px 6px",borderRadius:4,letterSpacing:"0.04em",
-                          fontWeight:500,flexShrink:0,
-                        }}>{c.caseSerial}</span>
-                      )}
-                    </div>
-                    <div className="case-meta">
-                      {offerCountry} · {new Date(c.savedAt).toLocaleDateString()}
-                      {c.counsellorName && <span style={{opacity:.6}}> · {c.counsellorName}</span>}
-                    </div>
-                    {/* ── Application target pills (up to 3) ── */}
-                    {Array.isArray(c.applicationTargets) && c.applicationTargets.length > 0 && (
-                      <div style={{display:"flex",alignItems:"center",gap:5,marginTop:3,flexWrap:"wrap"}}>
-                        {c.applicationTargets.slice(0, 3).map((t, ti) => {
-                          const resolvedCountry = t.country === "Other" ? t.countryOther : t.country;
-                          const flag = resolvedCountry ? (COUNTRY_FLAGS[resolvedCountry] || "🌍") : null;
-                          const seasonShort = t.intakeSeason ? t.intakeSeason.split(" ")[0] : null;
-                          const label = [flag, seasonShort, t.intakeYear].filter(Boolean).join(" ");
-                          if (!label.trim()) return null;
-                          return (
-                            <span key={ti} style={{
-                              display:"inline-flex",alignItems:"center",gap:4,
-                              fontSize:10,fontWeight:600,fontFamily:"var(--fm)",
-                              background: ti === 0 ? "rgba(29,107,232,0.12)" : "rgba(100,116,139,0.10)",
-                              color: ti === 0 ? "var(--p)" : "var(--t2)",
-                              border:`1px solid ${ti === 0 ? "rgba(29,107,232,0.25)" : "rgba(100,116,139,0.2)"}`,
-                              padding:"2px 7px",borderRadius:4,letterSpacing:".03em",
-                            }}>
-                              <GraduationCap size={10}/>{label}
-                              {t.deferred && <span style={{color:"var(--warn)",marginLeft:2}}>·D</span>}
-                            </span>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                  <div className="case-r">
-                    <span className={`badge ${scoreBadge(score)}`}>{score}/100</span>
-                    <ChevronDown size={14} className={`chev${exp === c.id ? " open" : ""}`}/>
-                  </div>
-                </div>
-                {exp === c.id && (() => {
-                  // Use fully-loaded data if available, else fall back to summary
-                  const fullC = expandedData[c.id] || c;
-                  const ep = fullC.profile || fullC.results?.studentProfile || profile;
-                  const eFlags = fullC.results?.redFlags?.length || 0;
-                  const loading = c._summaryOnly && !expandedData[c.id];
-                  return (
-                  <div className="case-body">
-                    {loading && <div style={{fontSize:11,color:"var(--t3)",fontFamily:"var(--fm)",marginBottom:8,display:"flex",alignItems:"center",gap:6}}><Loader2 size={11} style={{animation:"spin .7s linear infinite"}}/>Loading details…</div>}
-                    <div className="mini-grid">
-                      {[
-                        {l:"Case ID",    v:c.caseSerial},
-                        {l:"CNIC",       v:ep.cnicNumber},
-                        {l:"CNIC Expiry",v:ep.cnicExpiry},
-                        {l:"Passport",   v:ep.passportNumber},
-                        {l:"P. Expiry",  v:ep.passportExpiry},
-                        {l:"IELTS",      v:ep.ieltsScore},
-                        {l:"Balance",    v:ep.financialBalance},
-                        {l:"Programme",  v:ep.program},
-                        {l:"Flags",      v:loading ? "—" : `${eFlags} issue${eFlags !== 1 ? "s" : ""}`},
-                      ].map(f => (
-                        <div key={f.l} className="mini-f">
-                          <div className="mini-l">{f.l}</div>
-                          <div className={`mini-v${!f.v || f.v === "Not found" ? " e" : ""}${f.l==="Case ID"?" mono":""}`}
-                            style={f.l==="Case ID"?{fontFamily:"var(--fm)",fontSize:"0.75rem",letterSpacing:"0.03em"}:{}}>
-                            {f.v || "—"}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                    <div className="sec-lbl">Counsellor Notes</div>
-                    {loading
-                      ? <div className="case-no-notes">Open full analysis to view notes.</div>
-                      : fullC.notes
-                        ? <div className="case-notes-txt">{fullC.notes}</div>
-                        : <div className="case-no-notes">No notes recorded.</div>
-                    }
-                    <div className="case-acts">
-                      <button className="btn-s" onClick={() => onLoad(c)}><ArrowUpRight size={13}/>Open Full Analysis</button>
-                      <button className="btn-danger" onClick={() => handleDelete(c.id)}><Trash2 size={13}/>Delete</button>
-                    </div>
-                  </div>
-                  );
-                })()}
-              </div>
-            );
-          })}
-        </div>
-        {totalPages > 1 && !search.trim() && (
-          <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:12,padding:"18px 0 6px"}}>
-            <button
-              className="btn-s"
-              onClick={() => loadPage(histPage - 1)}
-              disabled={histPage === 0 || loadingHist}
-              style={{minWidth:90,justifyContent:"center"}}
-            >
-              ← Previous
-            </button>
-            <span style={{fontSize:12,color:"var(--t3)",fontFamily:"var(--fm)",whiteSpace:"nowrap"}}>
-              {loadingHist
-                ? <><Loader2 size={11} style={{animation:"spin .7s linear infinite",verticalAlign:"middle",marginRight:4}}/>Loading…</>
-                : <>Page {histPage + 1} of {totalPages}</>
-              }
-            </span>
-            <button
-              className="btn-s"
-              onClick={() => loadPage(histPage + 1)}
-              disabled={histPage >= totalPages - 1 || loadingHist}
-              style={{minWidth:90,justifyContent:"center"}}
-            >
-              Next →
-            </button>
-          </div>
-        )}
-        </>
-      )}
-    </div>
-  );
-}
+// CaseHistory component extracted to src/CaseHistory.jsx
 
 /* ─── POLICY ALERT HELPERS ───────────────────────────────────────── */
 function normaliseCountry(raw) {
@@ -4920,20 +4068,20 @@ function buildChatContext(profileData, results, docs) {
     "=== RED FLAGS ===",
     (results.redFlags||[]).map(f=>`[${f.severity?.toUpperCase()}] ${f.flag} — ${f.detail}`).join("\n") || "None",
     "",
-	"=== DETECTED SPECIAL DOCUMENTS ===",
-	(profileData?.detectedDocs?.length
-	? profileData.detectedDocs.map(d =>
+  "=== DETECTED SPECIAL DOCUMENTS ===",
+  (profileData?.detectedDocs?.length
+  ? profileData.detectedDocs.map(d =>
       `- ${d.type}${d.reference ? ` | Ref: ${d.reference}` : ""}${d.amount ? ` | Amount: ${d.amount}` : ""}${d.date ? ` | Date: ${d.date}` : ""}${d.expiry ? ` | Expiry: ${d.expiry}` : ""}${d.result ? ` | Result: ${d.result}` : ""}${d.institution ? ` | Institution: ${d.institution}` : ""}${d.notes ? ` | Notes: ${d.notes}` : ""}`
     ).join("\n")
   : "None detected"),
-	"",   
-	"=== NAME MISMATCHES ===",
-	(profileData?.nameMismatches?.length
-	? profileData.nameMismatches.map(m =>
+  "",   
+  "=== NAME MISMATCHES ===",
+  (profileData?.nameMismatches?.length
+  ? profileData.nameMismatches.map(m =>
       `- ${m.doc}: Found "${m.nameFound}" — ${m.issue}`
     ).join("\n")
   : "None detected"),
-	"",
+  "",
    "=== REJECTIONS / DEFERMENTS ===",
     (results.rejections||[]).map(r=>`${r.type} — ${r.country||""} ${r.university||""} ${r.program||""} (${r.date||"no date"}): ${r.reason||""}`).join("\n") || "None found",
     "",
@@ -5533,21 +4681,21 @@ function SOPTargetPicker({ profileData, preferredOfferIndex, requirementsData, o
   return (
     <div className="rc rc-purple" style={{marginBottom:0}}>
       <div className="rc-hdr rc-hdr--purple">
-        <div className="rc-ico"><Building2 size={14} color="#4A5D7E"/></div>
+        <div className="rc-ico"><Building2 size={14} color="#ffffff"/></div>
         <span className="rc-ttl">Target University</span>
         {fromOffer && country && (
           <span style={{
-            marginLeft:6, fontSize:10, fontWeight:600, color:"#059669",
-            background:"rgba(5,150,105,.1)", border:"1px solid rgba(5,150,105,.2)",
+            marginLeft:6, fontSize:10, fontWeight:600, color:"#ffffff",
+            background:"rgba(255,255,255,0.2)", border:"1px solid rgba(255,255,255,0.3)",
             borderRadius:"var(--r1)", padding:"2px 7px", display:"flex", alignItems:"center", gap:4,
           }}>
-            <CheckCircle size={9}/>From offer letter
+            <CheckCircle size={9} color="#ffffff"/>From offer letter
           </span>
         )}
         {!fromOffer && country && (
           <span style={{
-            marginLeft:6, fontSize:10, fontWeight:600, color:"#b45309",
-            background:"rgba(180,83,9,.08)", border:"1px solid rgba(180,83,9,.2)",
+            marginLeft:6, fontSize:10, fontWeight:600, color:"#ffffff",
+            background:"rgba(255,255,255,0.2)", border:"1px solid rgba(255,255,255,0.3)",
             borderRadius:"var(--r1)", padding:"2px 7px",
           }}>
             Manual selection
@@ -5555,8 +4703,8 @@ function SOPTargetPicker({ profileData, preferredOfferIndex, requirementsData, o
         )}
         {(country||uniName||progName) && (
           <button onClick={handleReset} title="Clear selection"
-            style={{marginLeft:"auto",fontSize:11,fontWeight:600,color:"var(--t3)",background:"transparent",border:"1px solid var(--bd)",borderRadius:"var(--r1)",padding:"2px 8px",cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>
-            <RefreshCw size={10}/>Clear
+            style={{marginLeft:"auto",fontSize:11,fontWeight:600,color:"#ffffff",background:"transparent",border:"1px solid rgba(255,255,255,0.3)",borderRadius:"var(--r1)",padding:"2px 8px",cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>
+            <RefreshCw size={10} color="#ffffff"/>Clear
           </button>
         )}
       </div>
@@ -5818,10 +4966,10 @@ TONE: British English. Formal and direct. Written as a legal declaration, not a 
       {/* ── Main SOP Card ── */}
       <div className="rc rc-purple">
         <div className="rc-hdr rc-hdr--purple">
-          <div className="rc-ico"><BookOpen size={14} color="#4A5D7E"/></div>
+          <div className="rc-ico"><BookOpen size={14} color="#ffffff"/></div>
           <span className="rc-ttl">AI SOP Builder</span>
           {(sopVA||sopVB) && (
-            <span style={{marginLeft:6,fontSize:10,fontWeight:600,color:"#059669",background:"rgba(5,150,105,.1)",border:"1px solid rgba(5,150,105,.2)",borderRadius:"var(--r1)",padding:"2px 7px"}}>
+            <span style={{marginLeft:6,fontSize:10,fontWeight:600,color:"#ffffff",background:"rgba(255,255,255,0.2)",border:"1px solid rgba(255,255,255,0.3)",borderRadius:"var(--r1)",padding:"2px 7px"}}>
               Saves with case
             </span>
           )}
@@ -5846,13 +4994,13 @@ TONE: British English. Formal and direct. Written as a legal declaration, not a 
 
           {/* ── Action toolbar ── */}
           <div className="toolbar" style={{justifyContent:"flex-start",marginBottom:16,gap:8,flexWrap:"wrap"}}>
-            <button className="btn-p" style={{width:"auto",padding:"0 14px"}} onClick={() => generateSOP("university")} disabled={loading||!hasProfile}>
+            <button className="btn-p btn-generate" style={{width:"auto",padding:"0 14px"}} onClick={() => generateSOP("university")} disabled={loading||!hasProfile}>
               {loading && activeTab==="university"
                 ? <><Loader2 size={14} style={{animation:"spin 1s linear infinite"}}/>Drafting…</>
                 : <><FileText size={14}/>{sopVA?"Regenerate":"Generate"} University SOP</>
               }
             </button>
-            <button className="btn-s" style={{width:"auto",padding:"0 14px"}} onClick={() => generateSOP("visa")} disabled={loading||!hasProfile}>
+            <button className="btn-p btn-generate" style={{width:"auto",padding:"0 14px"}} onClick={() => generateSOP("visa")} disabled={loading||!hasProfile}>
               {loading && activeTab==="visa"
                 ? <><Loader2 size={13} style={{animation:"spin 1s linear infinite"}}/>Drafting…</>
                 : <><ShieldCheck size={13}/>{sopVB?"Regenerate":"Generate"} Visa Intent SOP</>
@@ -6126,12 +5274,12 @@ ${(results?.redFlags || []).map(f => `[${f.severity}] ${f.flag}`).join("\n") || 
     <div className="grid" style={{ gridTemplateColumns: "1fr" }}>
       <div className="rc rc-purple">
         <div className="rc-hdr rc-hdr--purple">
-          <div className="rc-ico"><FileText size={14} color="#4A5D7E"/></div>
+          <div className="rc-ico"><FileText size={14} color="#ffffff"/></div>
           <span className="rc-ttl">AI Resume Builder</span>
         </div>
         <div className="rc-body">
           <div className="toolbar" style={{ justifyContent: "flex-start", marginBottom: 16, gap: "8px", flexWrap: "wrap" }}>
-            <button className="btn-p" style={{ width: "auto", padding: "0 16px" }} onClick={generateResume} disabled={loading}>
+            <button className="btn-p btn-generate" style={{ width: "auto", padding: "0 16px" }} onClick={generateResume} disabled={loading}>
               {loading ? <Loader2 size={14} style={{animation:"spin 1s linear infinite"}}/> : <FileText size={14}/>}
               {loading ? "Drafting Resume..." : resume ? "Regenerate Resume" : "Generate Resume"}
             </button>
@@ -6240,7 +5388,7 @@ function OrgStatusBar({ orgSession, orgCredits, onRefresh, onLogout }) {
             <X size={11}/>
             <span>Sign out</span>
           </button>
-		</div>
+    </div>
       </div>
     </div>
   );
@@ -6650,7 +5798,7 @@ function PersonClarificationUI({ preScanData, onConfirm, onSkip, loading, onRemo
           className="btn-p"
           style={{ flex: 1, maxWidth: 280 }}
           disabled={!hasStudent || (twoStudents && mergedIndices.size === 0) || loading}
-		  onClick={handleConfirm}
+      onClick={handleConfirm}
         >
           {loading
             ? <><Loader2 size={14} style={{ animation: "spin .7s linear infinite" }}/>Analysing…</>
@@ -6665,7 +5813,8 @@ function PersonClarificationUI({ preScanData, onConfirm, onSkip, loading, onRemo
 /* ─── MAIN APP ───────────────────────────────────────────────────── */
 
 // ── Summary columns (no heavy blobs) ─────────────────────────────────────────
-const CASE_SUMMARY_COLS = "id, case_serial, created_at, updated_at, status_updated_at, student_name, counsellor_name, overall_score, target_country, preferred_offer_index, application_targets, lead_status, expiry_date, expiry_doc_type, referral_source, payment_status";
+const CASE_PAGE_SIZE = 10;
+const CASE_SUMMARY_COLS = "id, case_serial, created_at, updated_at, status_updated_at, student_name, counsellor_name, assigned_to, overall_score, target_country, preferred_offer_index, application_targets, lead_status, expiry_date, expiry_doc_type, referral_source, payment_status";
 
 function _mapSummaryRow(r) {
   return {
@@ -6677,6 +5826,7 @@ function _mapSummaryRow(r) {
     studentName:         r.student_name || "",
     student_name:        r.student_name || "",
     counsellorName:      r.counsellor_name || "",
+    assigned_to:         r.assigned_to     || null,
     overallScore:        r.overall_score || 0,
     targetCountry:       r.target_country || "",
     preferredOfferIndex: r.preferred_offer_index || 0,
@@ -6701,8 +5851,8 @@ function _mapSummaryRow(r) {
 function _applyCaseScope(query, session) {
   const role = session?.role;
   if (role === 'counsellor' || role === 'viewer') {
-    // Strict: only cases this member created
-    return query.eq('created_by', session.member_id);
+    // Cases this member created OR has been assigned to (handles reassignments)
+    return query.or(`created_by.eq.${session.member_id},assigned_to.eq.${session.member_id}`);
   }
   // org_owner, branch_manager, senior_counsellor → whole org
   return query.eq('org_id', session.org_id);
@@ -6790,6 +5940,8 @@ async function loadFullCase(id) {
     };
   } catch (e) { console.error("Supabase full-load error:", e); return null; }
 }
+
+
 
 // ── searchCases ───────────────────────────────────────────────────────────────
 // Server-side search across student_name, case_serial, counsellor_name.
@@ -6885,11 +6037,34 @@ async function loadExpiryAlertsFromSupabase() {
 }
 
 function VisaLensApp({ orgSession, onLogout }) {
+
+  // ── callGeminiInsight: Gemini 3.1 Flash Lite text suggestions for child components ──
+  // Used by RadarMatrix hover insights. Calls the gemini-insight worker route —
+  // no credit deduction, logs to usage_log with endpoint:'micro_action'.
+  // Returns plain text string directly.
+  async function callGeminiInsight(prompt, caseId) {
+    await refreshTokenIfNeeded();
+    const resp = await fetch(PROXY_URL, {
+      method:  'POST',
+      headers: getAuthHeaders(),
+      body:    JSON.stringify(withOrg({
+        action:  'gemini-insight',
+        prompt,
+        ...(caseId && { case_id: caseId }),
+      })),
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error || `Proxy error ${resp.status}`);
+    return data.text || '';
+  }
+
   const [tab,               setTab]               = useState("home");
   const [isAdminUnlocked,   setIsAdminUnlocked]   = useState(false);
   const [sidebarOpen,       setSidebarOpen]        = useState(true);
   const [docPanelOpen,      setDocPanelOpen]       = useState(true);
   const [chatMessages,      setChatMessages]       = useState([]);
+  const [chatOpen,          setChatOpen]           = useState(false);
+  const [analyzerSideTab,   setAnalyzerSideTab]    = useState("personal");
   const [orgCredits,        setOrgCredits]         = useState(orgSession?.analyses_remaining ?? null);
   const [resumeText,        setResumeText]         = useState("");
   const [sopText,           setSopText]            = useState("");
@@ -6925,6 +6100,7 @@ function VisaLensApp({ orgSession, onLogout }) {
   const [readinessSelection,setReadinessSelection] = useState(new Set()); // doc IDs selected for analysis
   const [preferredOfferIndex, setPreferredOfferIndex] = useState(0);
   const [activeCaseId, setActiveCaseId] = useState(null);
+  const [activeStudentId, setActiveStudentId] = useState(null); // used for ProgramMatcher "jump"
   const [leadStatus, setLeadStatus] = useState("None");
   const [applicationTargets, setApplicationTargets] = useState([]);
   // Auto-seed from session: full_name is the authoritative field from the RBAC login
@@ -6953,12 +6129,84 @@ function VisaLensApp({ orgSession, onLogout }) {
   const [driveSaveResult,   setDriveSaveResult]   = useState(null);
   const [policyAlerts,      setPolicyAlerts]      = useState([]);
   const [inboxUnread,       setInboxUnread]       = useState(0);
+  const [chatUnread,        setChatUnread]        = useState(0);
   const [calendarDate,      setCalendarDate]      = useState(null);
+  const [orgMembers,        setOrgMembers]        = useState([]); // active profiles for counsellor dropdowns
+
+  // ── App-level floating chat tray (persists across tab changes) ────────
+  // Each entry: { caseId: string, studentName: string, minimised: bool }
+  // Max 3 panels. Opening the same case un-minimises it rather than duplicating.
+  const [openChats, setOpenChats] = useState([]);
+  const [peekOpen,  setPeekOpen]  = useState(false);
+
+  function openChat(caseId, studentName) {
+    setOpenChats(prev => {
+      const existing = prev.find(c => c.caseId === caseId);
+      if (existing) {
+        // Already open — just un-minimise it
+        return prev.map(c => c.caseId === caseId ? { ...c, minimised: false } : c);
+      }
+      const next = [...prev, { caseId, studentName, minimised: false }];
+      return next.slice(-3); // keep max 3, drop oldest
+    });
+  }
+  // Register into module-level bridge so any component can call chatBridge.open()
+  chatBridge.open = openChat;
+
+  function closeChat(caseId) {
+    setOpenChats(prev => prev.filter(c => c.caseId !== caseId));
+  }
+
+  function toggleChatMinimise(caseId) {
+    setOpenChats(prev => prev.map(c => c.caseId === caseId ? { ...c, minimised: !c.minimised } : c));
+  }
+  // ─────────────────────────────────────────────────────────────────────
   const fileRef = useRef();
   const autoSaveTimer = useRef(null);
   const resultsRef = useRef(null);
   const qualitiesRef = useRef({});
   const preScanRunning = useRef(false);
+
+// ─── INSERT NEW REALTIME SYNC BRIDGE HERE ──────────────────────────
+useEffect(() => {
+  if (!activeCaseId || !orgSession?.org_id) return;
+
+  console.log(`🔌 Initializing Realtime sync for Case: ${activeCaseId}`);
+
+  const channel = supabase
+    .channel(`active-case-sync-${activeCaseId}`) // Note: added ID to channel name for uniqueness
+    .on(
+      'postgres_changes',
+      {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'cases',
+        filter: `id=eq.${activeCaseId}`,
+      },
+      (payload) => {
+        const updatedRow = payload.new;
+        console.log("⚡ Realtime Update Received:", updatedRow);
+
+        // Update local profileData so the UI reflects DB changes instantly
+        // Only update from profile_data column to avoid corrupting with raw DB column names
+        if (updatedRow.profile_data) {
+          setProfileData((prev) => ({ ...prev, ...updatedRow.profile_data }));
+        }
+
+        // Update results if the AI background worker finished a re-assessment
+        if (updatedRow.results) {
+          setResults(updatedRow.results);
+        }
+      }
+    )
+    .subscribe();
+
+  return () => {
+    console.log("🔌 Closing Realtime channel");
+    supabase.removeChannel(channel);
+  };
+}, [activeCaseId, orgSession?.org_id]);
+// ──────────────────────────────────────────────────────────────────
 
   useEffect(() => {
     const root = document.documentElement;
@@ -6987,9 +6235,11 @@ function VisaLensApp({ orgSession, onLogout }) {
   useEffect(() => {
     if (!results || !profileDirty) { setLiveElig(null); return; }
     const p = profileData;
-    const requiredFields = ["fullName","passportNumber","passportExpiry","financialBalance","academicResult"];
-    const filledCount = requiredFields.filter(k => p[k] && p[k] !== "Not found" && p[k] !== "").length;
-    const docScore = Math.round((filledCount / requiredFields.length) * 100);
+
+    // ── Document score — unified formula (same as DocChecklist + MAIN_PROMPT) ──
+    const docResult = computeDocScore(p, results);
+    const docScore  = docResult.score;
+
     let finScore = results.eligibility.financialScore;
     if (p.financialBalance && p.fundsRequired) {
       const avail = parseCurrencyAmount(p.financialBalance);
@@ -7025,6 +6275,19 @@ function VisaLensApp({ orgSession, onLogout }) {
   }, [results]);
  useEffect(() => {
   (async () => {
+    // ── Restore Supabase auth session so RLS policies see the correct auth.uid() ──
+    // The app authenticates via the worker which returns access_token + refresh_token.
+    // Without this, the Supabase JS client makes requests as anon and RLS blocks everything.
+    try {
+      const _s = (() => { try { const r = sessionStorage.getItem("visalens_org_session"); return r ? JSON.parse(r) : null; } catch { return null; } })();
+      if (_s?.access_token && _s?.refresh_token) {
+        await supabase.auth.setSession({
+          access_token:  _s.access_token,
+          refresh_token: _s.refresh_token,
+        });
+      }
+    } catch (e) { console.warn('[Auth] setSession failed:', e); }
+
     const remoteCases = await loadCasesFromSupabase();
     const total = await countCasesInSupabase();
     setTotalCases(total);
@@ -7097,7 +6360,57 @@ function VisaLensApp({ orgSession, onLogout }) {
     } catch {}
   })();
   preloadDriveScripts();
-}, []); 
+  // Fetch active org members for counsellor dropdowns (analyzer + reassign)
+  (async () => {
+    try {
+      const _s = (() => { try { const r = sessionStorage.getItem("visalens_org_session"); return r ? JSON.parse(r) : null; } catch { return null; } })();
+      if (_s?.org_id) {
+        const { data } = await supabase.from('profiles').select('id, full_name').eq('org_id', _s.org_id).eq('is_active', true);
+        if (data) setOrgMembers(data);
+      }
+    } catch {}
+  })();
+}, []);
+
+/* ── Chat unread count — queries chat_messages vs chat_reads ─────────
+   Counts messages the current counsellor hasn't read yet: newer than
+   their last_read_at per case, sent by someone else.
+   Re-runs on tab change so the badge clears promptly after they open
+   the Dashboard and view a thread.                                    */
+useEffect(() => {
+  async function loadChatUnread() {
+    try {
+      const s = JSON.parse(sessionStorage.getItem('visalens_org_session') || 'null');
+      if (!s?.org_id || !s?.member_id) return;
+
+      // 1. This counsellor's last-read timestamp per case
+      const { data: reads } = await supabase
+        .from('chat_reads')
+        .select('case_id, last_read_at')
+        .eq('member_id', s.member_id);
+      const readMap = Object.fromEntries((reads || []).map(r => [r.case_id, r.last_read_at]));
+
+      // 2. Recent messages sent by others (not self)
+      const { data: msgs } = await supabase
+        .from('chat_messages')
+        .select('id, case_id, created_at')
+        .eq('org_id', s.org_id)
+        .eq('is_deleted', false)
+        .neq('sender_id', s.member_id)
+        .order('created_at', { ascending: false })
+        .limit(500);
+
+      // 3. Count those newer than last_read_at
+      const unreadCount = (msgs || []).filter(m => {
+        const lastRead = readMap[m.case_id];
+        return !lastRead || new Date(m.created_at) > new Date(lastRead);
+      }).length;
+
+      setChatUnread(unreadCount);
+    } catch { /* fail silently — badge stays at 0 */ }
+  }
+  loadChatUnread();
+}, [tab]);
 
 async function persist(u) { try { await window.storage.set("visalens_v14", JSON.stringify(u)); } catch {} }
 
@@ -7143,10 +6456,31 @@ async function saveCaseToSupabase(profile, res, docList, notesText, prefIdx, cou
       ? (primaryTarget.countryOther || primaryTarget.country || "")
       : "";
     const country = primaryCountry || resolved.country || profile.targetCountry || "";
+    const studentName = profile.fullName || profile.studentName || "Unknown";
+
+    // Calculate readiness and viability scores for score_data
+    const readinessScore = computeDocScore(profile, res || {});
+    const viabilityScoreData = viabilityScore(profile);
+    const scoreData = {
+      readiness: {
+        score: readinessScore.score,
+        breakdown: readinessScore.breakdown
+      },
+      viability: {
+        score: viabilityScoreData.score,
+        confidence: viabilityScoreData.confidence,
+        breakdown: viabilityScoreData.breakdown
+      },
+      metadata: {
+        calculatedAt: new Date().toISOString(),
+        version: "1.0"
+      }
+    };
+
     const caseSerial = await generateCaseSerial(
       session.org_id,
       session.org_name,
-      profile.fullName,
+      studentName,
       country
     );
     const { data, error } = await supabase.from("cases").insert({
@@ -7173,6 +6507,7 @@ async function saveCaseToSupabase(profile, res, docList, notesText, prefIdx, cou
       target_country:        country,
       application_targets:   applicationTargets,
       lead_status:           leadStatus || "None",
+      score_data:            scoreData,
     }).select("id, case_serial").single();
     if (error) { console.error("Supabase save error:", error); return null; }
     return { id: data?.id, caseSerial: data?.case_serial };
@@ -7565,8 +6900,8 @@ async function saveCaseToSupabase(profile, res, docList, notesText, prefIdx, cou
           notes || "(no notes)",
         ].join("\n");
         const reportBlob = new Blob([lines], { type: "text/plain" });
-		const reportName = `VisaLens_Report_${studentName.replace(/\s+/g, "_")}.txt`;
-		await uploadFileToDrive(token, subId, reportBlob, reportName);
+    const reportName = `VisaLens_Report_${studentName.replace(/\s+/g, "_")}.txt`;
+    await uploadFileToDrive(token, subId, reportBlob, reportName);
       }
 
       // Get folder link
@@ -8061,7 +7396,7 @@ function exportCSV() {
       else content.push({type:"text",text:`[Content]: ${(await doc.file.text()).slice(0,2000)}`});
     }
     if (prompt) content.push({type:"text",text:prompt});
-	return content;
+  return content;
   }
 
   async function callAPI(content, maxTokens=1500, { billable=false, creditsCost=1, system=null, estimatedTokens=0 }={}) {
@@ -8421,12 +7756,12 @@ Field extraction rules:
 - cnicNumber: Scan ALL uploaded documents for a Pakistani National Identity Card (CNIC) regardless of filename. A CNIC front is identified by ALL of these visual markers: (1) printed header "PAKISTAN National Identity Card" or "Islamic Republic of Pakistan"; (2) a gold/yellow chip on the left; (3) fields labelled "Name", "Identity Number" (format XXXXX-XXXXXXX-X), "Date of Birth", "Date of Issue", "Date of Expiry"; (4) a black-and-white photo top-right; (5) Urdu text alongside English. Extract the Identity Number in format XXXXX-XXXXXXX-X. Set to "Not found" if no CNIC front is found.
 - cnicExpiry: From the same CNIC front identified above, extract the "Date of Expiry" field. Format as found (e.g. 07.03.2022). NEVER use passport expiry for this field. Set to "Not found" if no CNIC front found.
 - cnicAddressRomanUrdu: Scan ALL uploaded documents for a Pakistani CNIC back side. The back may appear as a separate image, OR combined with the front on the same PDF page (one card above the other). The back is identified by these markers: 
-	(1) CNIC number (XXXXX-XXXXXXX-X) printed top-right; 
-	(2) small photo top-left; 
-	(3) black QR code top-right; 
-	(4) two lines of Urdu address text — upper line starting with "موجودہ پتہ" and the lower line starting with or containing "مستقل پتہ" — the address text follows immediately after this label on the same line, separated by a colon 
-	پتہ"; (5) registration number below QR code; 
-	(6) "Registrar General of Pakistan" bottom-left. IMPORTANT:  Extract ONLY the مستقل پتہ line.
+  (1) CNIC number (XXXXX-XXXXXXX-X) printed top-right; 
+  (2) small photo top-left; 
+  (3) black QR code top-right; 
+  (4) two lines of Urdu address text — upper line starting with "موجودہ پتہ" and the lower line starting with or containing "مستقل پتہ" — the address text follows immediately after this label on the same line, separated by a colon 
+  پتہ"; (5) registration number below QR code; 
+  (6) "Registrar General of Pakistan" bottom-left. IMPORTANT:  Extract ONLY the مستقل پتہ line.
 - financialHolder: full name of account holder as printed on bank statement.
 - financialBalance: extract the MOST RECENT closing/available balance from the student's or confirmed sponsor's primary bank statement.
 - academicResult: list EACH qualification on a SEPARATE line. Format: "[Degree] ([Year if known]): [Result/Grade]".
@@ -8480,7 +7815,23 @@ Field extraction rules:
   5. DOCUMENTS COMPLETE / MISSING DOCUMENTS — verdict on the FULL visa document package (passport, CNIC, offer letter, CAS, financials, TB, IHS); NEVER use DOCUMENTS COMPLETE if anything is missing; use MISSING DOCUMENTS and list ALL absent items
   6. CRITICAL GAPS / MAJOR BLOCKER / CRITICAL BLOCKER — only if admission docs (offer letter, CAS) or other visa-critical items are absent and prevent assessment; OMIT this line if no blocker exists
   RULES: Each label appears AT MOST ONCE. DOCUMENTS COMPLETE and MISSING DOCUMENTS are mutually exclusive — never both. English test results MUST use ENGLISH PROFICIENCY label, never DOCUMENTS COMPLETE.
-Scoring: overallScore = financial(40%) + academic(30%) + document(30%). Return ONLY the JSON object.`;
+Scoring rules — follow these EXACTLY, do not invent your own formula:
+documentScore: Start at 0. Add points ONLY when the field is genuinely extracted and non-empty (not "Not found"):
+  +25 if passportNumber AND passportExpiry are both present and passportExpiry is a future date
+  +10 if only one of passportNumber or passportExpiry is present (partial)
+  +20 if englishTests array has at least one entry with a real overallScore (or ieltsScore/toeflScore/pteScore is filled)
+  +15 if financialBalance is present
+  +15 if academicResult is present
+  +10 if cnicNumber is present
+  +10 if offerLetters array has at least one entry with a university name
+  +5  if casDocuments array has at least one entry with a casNumber or university
+  IMPORTANT: Every item in missingDocuments REDUCES the category score to 0 for that item — a missing doc cannot also score points.
+  documentScore MUST be 0 if BOTH passportNumber and passportExpiry are absent.
+  documentScore of 100 is ONLY possible if all 7 categories above are satisfied with real data.
+financialScore: 0–100 based on financial evidence quality and fund sufficiency.
+academicScore: 0–100 based on academic qualifications, GPA, and English test scores combined.
+overallScore = financialScore×0.40 + academicScore×0.30 + documentScore×0.30. Round to integer.
+Return ONLY the JSON object.`;
 
     // ── Estimate tokens + tier BEFORE the call ───────────────────────────
     // estimateTokens() uses file size/type heuristics matching worker tokenTier().
@@ -8773,6 +8124,7 @@ Rules:
     setChatMessages([]); setResumeText("");
     setAnalysedDocIds(new Set());
     setApplicationTargets([]);
+    setExpiryDates({}); setExpiryDirty(false);
     setLeadStatus("None");
     try { window.storage.delete("visalens_v14_profile"); } catch {}
   }
@@ -8802,7 +8154,7 @@ Rules:
     const leadChanged =
       prevCase && (prevCase.leadStatus || "None") !== (leadStatus || "None");
     const statusTs = new Date().toISOString();
-    await updateCaseInSupabase(activeCaseId, notes, preferredOfferIndex, sopText, universitySop, visaSop, resumeText, applicationTargets, leadStatus, profileWithExpiry, expiryDates);
+    await updateCaseInSupabase(activeCaseId, notes, preferredOfferIndex, sopText, universitySop, visaSop, resumeText, applicationTargets, leadStatus, profileWithExpiry, expiryDates, results);
     setExpiryDirty(false);
     const primaryTarget  = applicationTargets[0];
     const primaryCountry = primaryTarget ? (primaryTarget.countryOther || primaryTarget.country || "") : "";
@@ -8813,6 +8165,9 @@ Rules:
         targetCountry: primaryCountry || c.targetCountry,
         expiryDate:    savedExpiryDate    || c.expiryDate,
         expiryDocType: savedExpiryDocType || c.expiryDocType,
+        profileData:   profileWithExpiry,
+        results:       results,
+        overallScore:  results?.eligibility?.overallScore ?? c.overallScore,
         ...(leadChanged ? { statusUpdatedAt: statusTs } : {}),
       } : c
     ));
@@ -8854,7 +8209,7 @@ Rules:
     // If we only have the summary row, fetch the full case first
     let fullCase = c;
     if (c._summaryOnly) {
-      setSavedMsg("Loading…");
+      setSavedMsg("Loading case data…");
       const loaded = await loadFullCase(c.id);
       if (!loaded) {
         setSavedMsg("Could not load case — please try again.");
@@ -8864,20 +8219,23 @@ Rules:
       fullCase = loaded;
       // Cache into local state so next open is instant (no re-fetch)
       setCases(prev => prev.map(x => x.id === c.id ? { ...x, ...fullCase, _summaryOnly: false } : x));
-      setSavedMsg("");
+      setSavedMsg("Case loaded successfully");
+      setTimeout(() => setSavedMsg(""), 2000);
     }
 
-    setDocs([]);
-    setQualities({});
-    setDocTypes({});
-    setSubTypes({});
-    setPersonTags({});
-    setCustomLabels({});
-    setDocDepOpen({});
+    // Clear ALL state first (using the same logic as the Clear button)
+    clearAll();
+
+    // Set the loaded case data
     setActiveCaseId(fullCase.id);
-    setResults(fullCase.results);
-    const migratedProfile = migrateOfferLetter(fullCase.profile || fullCase.results?.studentProfile || {});
+    setActiveStudentId(fullCase.id);
+    setResults(fullCase.results || null);
+    
+    // Load profile data with proper migration
+    const profileToLoad = fullCase.profile || fullCase.results?.studentProfile || {};
+    const migratedProfile = migrateOfferLetter(profileToLoad);
     setProfileData(migratedProfile);
+    
     setPreferredOfferIndex(fullCase.preferredOfferIndex || 0);
     setNotes(fullCase.notes || "");
     setSopText(fullCase.sopText || "");
@@ -8887,19 +8245,90 @@ Rules:
     setCounsellorName(fullCase.counsellorName || "");
     setApplicationTargets(Array.isArray(fullCase.applicationTargets) ? fullCase.applicationTargets : []);
     setLeadStatus(fullCase.leadStatus || "None");
-    setProfileDirty(false); setLiveElig(null);
+    setProfileDirty(false);
+    setLiveElig(null);
     setExpiryDates(migratedProfile?.expiryDates || {});
     setExpiryDirty(false);
     setAnalysedDocIds(new Set());
     setDriveSaveResult(null);
+    
+    // Switch to analyze tab
     setTab("analyze");
   }, [docs, results]); // useCallback — ensures Dashboard always gets fresh reference
 
-	async function handleDeleteCase(id) {
-	await deleteCaseFromSupabase(id);
-	const u = cases.filter(c => c.id !== id);
-	setCases(u); persist(u);
-	}
+  // Jump from StudentDashboard → ProgramMatcher with a specific student loaded
+  const handleJumpToMatcher = useCallback(async (studentId) => {
+    setActiveStudentId(studentId);
+    setTab('match');
+    try {
+      const { data, error } = await supabase
+        .from('cases')
+        .select('profile_data, student_name')
+        .eq('id', studentId)
+        .single();
+      if (error) { console.error('[App] jump-to-matcher load error:', error); return; }
+      if (data?.profile_data) {
+        // Ensure ProgramMatcher can detect a "new student" jump via profile.id
+        setProfileData({ ...data.profile_data, id: studentId, student_name: data.student_name || data.profile_data?.student_name });
+      }
+    } catch (e) {
+      console.error('[App] jump-to-matcher load error:', e);
+    }
+  }, []);
+
+// ── updateCaseStatus ─────────────────────────────────────────────────────────
+// Handles the OPTIMISTIC UI transition for student stages.
+// This makes moving a student feel instant while syncing in the background.
+const updateCaseStatus = async (caseId, newStatus) => {
+  // 1. Snapshot for rollback if the network fails
+  const previousCases = [...cases];
+  
+  // 2. OPTIMISTIC UPDATE: Update local state IMMEDIATELY
+  // Note: We use 'leadStatus' to match your existing state variable names
+  setCases(prev => prev.map(c => 
+    c.id === caseId 
+      ? { ...c, leadStatus: newStatus, isOptimistic: true, error: null } 
+      : c
+  ));
+
+  try {
+    const session = getOrgSession();
+    if (!session?.org_id) throw new Error("No session");
+
+    // 3. API Request: Matches your Supabase column 'lead_status'
+    const { error } = await supabase
+      .from('cases')
+      .update({ 
+        lead_status: newStatus,
+        status_updated_at: new Date().toISOString() 
+      })
+      .eq('id', caseId)
+      .eq('org_id', session.org_id);
+
+    if (error) throw error;
+
+    // 4. Success: Clear the 'optimistic' flag
+    setCases(prev => prev.map(c => 
+      c.id === caseId ? { ...c, isOptimistic: false } : c
+    ));
+
+  } catch (err) {
+    // 5. ROLLBACK: If it fails, snap back to the previous state
+    console.error("Pipeline update failed:", err.message);
+    setCases(previousCases);
+    
+    // Optional: Mark the specific card with an error
+    setCases(prev => prev.map(c => 
+      c.id === caseId ? { ...c, error: "Failed to save status." } : c
+    ));
+  }
+};
+
+  async function handleDeleteCase(id) {
+  await deleteCaseFromSupabase(id);
+  const u = cases.filter(c => c.id !== id);
+  setCases(u); persist(u);
+  }
   async function handleLoadMoreCases() {
     const nextPage = caseListPage + 1;
     const { cases: more, hasMore } = await loadMoreCases(nextPage);
@@ -8910,7 +8339,7 @@ Rules:
       return [...prev, ...more.filter(c => !existingIds.has(c.id))];
     });
   }
-	async function updateCaseInSupabase(id, notesText, prefIdx, sopText, uniSop, visaSop, resumeText, applicationTargets = [], leadStatus = "None", updatedProfile = null, expiryDatesMap = {}) {
+  async function updateCaseInSupabase(id, notesText, prefIdx, sopText, uniSop, visaSop, resumeText, applicationTargets = [], leadStatus = "None", updatedProfile = null, expiryDatesMap = {}, updatedResults = null) {
   const session = getOrgSession();
   if (!session?.org_id) return;
   try {
@@ -8922,6 +8351,27 @@ Rules:
     const nextLead = leadStatus || "None";
     const leadStatusChanged = row != null && prevLead !== nextLead;
 
+    // Calculate readiness and viability scores for score_data
+    const profileToScore = updatedProfile || row?.profileData || {};
+    const resultsToScore = updatedResults || row?.results || {};
+    const readinessScore = computeDocScore(profileToScore, resultsToScore);
+    const viabilityScoreData = viabilityScore(profileToScore);
+    const scoreData = {
+      readiness: {
+        score: readinessScore.score,
+        breakdown: readinessScore.breakdown
+      },
+      viability: {
+        score: viabilityScoreData.score,
+        confidence: viabilityScoreData.confidence,
+        breakdown: viabilityScoreData.breakdown
+      },
+      metadata: {
+        calculatedAt: new Date().toISOString(),
+        version: "1.0"
+      }
+    };
+
     const updatePayload = {
       notes:                notesText || "",
       sop_text:             sopText || "",
@@ -8931,10 +8381,18 @@ Rules:
       preferred_offer_index: prefIdx || 0,
       application_targets:  applicationTargets,
       lead_status:          nextLead,
+      updated_at:           new Date().toISOString(),
       ...(updatedProfile ? { profile_data: updatedProfile } : {}),
+      // Write results + overall_score when provided (e.g. after re-assess)
+      // so StudentDashboard's realtime subscription picks up the new doc score
+      ...(updatedResults ? {
+        results:       updatedResults,
+        overall_score: updatedResults?.eligibility?.overallScore ?? (row?.overallScore ?? 0),
+      } : {}),
       ...(expiry_date ? { expiry_date, expiry_doc_type } : {}),
       ...(expiryDatesMap?.counsellorEmail ? { counsellor_email: expiryDatesMap.counsellorEmail } : {}),
       ...(leadStatusChanged ? { status_updated_at: new Date().toISOString() } : {}),
+      score_data:            scoreData,
     };
     if (primaryCountry) updatePayload.target_country = primaryCountry;
     const { error } = await supabase.from("cases")
@@ -8955,6 +8413,19 @@ async function renameCounsellorInSupabase(oldName, newName) {
     if (error) console.error('Rename error:', error);
   } catch (e) { console.error('Rename error:', e); }
 }
+
+async function mergeCounsellorsInSupabase(sourceName, targetName) {
+  const session = getOrgSession();
+  if (!session?.org_id) return;
+  try {
+    const { error } = await supabase.from('cases')
+      .update({ counsellor_name: targetName })
+      .eq('counsellor_name', sourceName)
+      .eq('org_id', session.org_id);
+    if (error) console.error('Merge error:', error);
+  } catch (e) { console.error('Merge error:', e); }
+}
+
   const reAssessLastRun = useRef(0);
 
   async function reAssess() {
@@ -9005,6 +8476,22 @@ Summary: Write one sentence per category in this exact order using ONLY these la
 Each label used at most once. English test results must use ENGLISH PROFICIENCY label only, never DOCUMENTS COMPLETE.
 Findings: Array of {title, detail} for anything notable not covered by the structured labels above.`;
 
+      // ── Pipeline context injection ────────────────────────────────────────
+      // leadStatus and recent notes are written by the Dashboard but were
+      // previously invisible to re-assess. Including them here prevents the
+      // AI from scoring a student as "intake stage" when they've already been
+      // moved to "Application Submitted" or had a visa appointment booked.
+      //
+      // We take the last 3 note lines only — sending the full notes log could
+      // push the prompt over budget and most of it is stale context anyway.
+      // The slice is done on non-empty lines to avoid counting blank separators.
+      const recentNoteLines = (notes || "")
+        .split("\n")
+        .map(l => l.trim())
+        .filter(Boolean)
+        .slice(-3)
+        .join(" | ");
+
       const profileSummary = `EDITED STUDENT PROFILE:
 Name: ${p.fullName||"Not found"}
 DOB: ${p.dob||"Not found"}
@@ -9022,6 +8509,8 @@ Medium of Instruction: ${p.mediumOfInstruction||"Not found"}
 Financial Balance: ${p.financialBalance||"Not found"}
 Financial Holder: ${p.financialHolder||"Not found"}
 Funds Required: ${p.fundsRequired||"Not entered"}
+Lead Status: ${leadStatus||"None"}
+Recent Activity: ${recentNoteLines||"No recent notes"}
 Previous Score: ${results.eligibility.overallScore}/100 | Missing: ${(results.missingDocuments||[]).map(m=>m.document).join(", ")||"None"} | Flags: ${(results.redFlags||[]).map(f=>`[${f.severity}] ${f.flag}`).join(", ")||"None"}`;
 
       const resp = await fetch(PROXY_URL, {
@@ -9047,15 +8536,51 @@ Previous Score: ${results.eligibility.overallScore}/100 | Missing: ${(results.mi
             : (results?.eligibility?.findings || []);
           parsed.eligibility.notes = toArr(parsed.eligibility.notes, []);
         }
-        setResults(prev => ({
-          ...prev,
-          eligibility:     parsed.eligibility     || prev.eligibility,
-          missingDocuments:toArr(parsed.missingDocuments, prev.missingDocuments),
-          redFlags:        toArr(parsed.redFlags,         prev.redFlags),
-        }));
+        // Build the new results object in a local var so we can pass it
+        // to Supabase AND to setResults in the same tick — no stale-closure risk.
+        const newResults = {
+          ...results,
+          eligibility:      parsed.eligibility                          || results.eligibility,
+          missingDocuments: toArr(parsed.missingDocuments, results.missingDocuments),
+          redFlags:         toArr(parsed.redFlags,         results.redFlags),
+        };
+        setResults(newResults);
         setLiveElig(null);
         setProfileDirty(false);
         setSavedMsg("Re-assessment complete"); setTimeout(()=>setSavedMsg(""),3000);
+
+        // ── Auto-save to Supabase ────────────────────────────────────────────
+        // reAssess() previously only updated React state — it never wrote to
+        // the DB. So StudentDashboard's realtime subscription never fired, and
+        // DocChecklist / DocHealthChip kept reading stale profileData /
+        // missingDocuments. Writing results + profile_data here fixes that.
+        if (activeCaseId) {
+          const profileWithExpiry = { ...profileData, expiryDates };
+          await updateCaseInSupabase(
+            activeCaseId,
+            notes,
+            preferredOfferIndex,
+            sopText,
+            universitySop,
+            visaSop,
+            resumeText,
+            applicationTargets,
+            leadStatus,
+            profileWithExpiry,
+            expiryDates,
+            newResults,   // ← writes results col + overall_score so realtime fires
+          );
+          // Patch local cases state immediately (realtime has ~200 ms latency)
+          setCases(prev => prev.map(c =>
+            c.id === activeCaseId
+              ? { ...c,
+                  results:      newResults,
+                  overallScore: newResults.eligibility?.overallScore ?? c.overallScore,
+                  profileData:  profileData,
+                }
+              : c
+          ));
+        }
       }
     } catch(e) { setError("Re-assessment failed: " + (e.message||"Unknown error")); }
     finally { setReassessing(false); }
@@ -9093,7 +8618,7 @@ Previous Score: ${results.eligibility.overallScore}/100 | Missing: ${(results.mi
   }
 
   return (
-    <>
+    <ChatContext.Provider value={openChat}>
       {preview    && <PreviewModal doc={preview} onClose={()=>setPreview(null)}/>}
       {showReport && <ReportModal profile={profileData} results={results} onClose={()=>setShowReport(false)}/>}
       {showZip    && docs.length > 0 && (
@@ -9134,6 +8659,7 @@ Previous Score: ${results.eligibility.overallScore}/100 | Missing: ${(results.mi
             >
               {sidebarOpen ? <ChevronDown size={14} style={{transform:"rotate(90deg)"}}/> : <ChevronDown size={14} style={{transform:"rotate(-90deg)"}}/>}
             </button>
+            <NotificationBell session={orgSession} />
           </div>
 
           {/* Active student badge */}
@@ -9158,82 +8684,121 @@ Previous Score: ${results.eligibility.overallScore}/100 | Missing: ${(results.mi
               {sidebarOpen && <span className="sidebar-nav-label">Home</span>}
             </button>
 
-			<button role="tab" aria-selected={tab==="analyze"} className={`sidebar-nav-item${tab==="analyze"?" on":""}`} onClick={()=>setTab("analyze")} title="Analyse">
-              <span className="sidebar-nav-icon"><FileText size={16}/></span>
-              {sidebarOpen && <span className="sidebar-nav-label">Analyse</span>}
-            </button>
+            {!orgSession?.restricted_tabs?.includes("analyze") && (
+        <button role="tab" aria-selected={tab==="analyze"} className={`sidebar-nav-item${tab==="analyze"?" on":""}`} onClick={()=>setTab("analyze")} title="Analyse">
+                <span className="sidebar-nav-icon"><FileText size={16}/></span>
+                {sidebarOpen && <span className="sidebar-nav-label">Analyse</span>}
+              </button>
+            )}
 
-            <button role="tab" aria-selected={tab==="chat"} className={`sidebar-nav-item${tab==="chat"?" on":""}`} onClick={()=>setTab("chat")} title="AI Chat">
-              <span className="sidebar-nav-icon"><MessageSquare size={16}/></span>
-              {sidebarOpen && <span className="sidebar-nav-label">AI Chat</span>}
-              {results && <span className="sidebar-nav-badge">✓</span>}
-            </button>
+            {/* AI Chat is now embedded inline in the Analyser */}
 
-            <button role="tab" aria-selected={tab==="resume"} className={`sidebar-nav-item${tab==="resume"?" on":""}`} onClick={()=>setTab("resume")} title="CV / Resume Builder">
-              <span className="sidebar-nav-icon"><FileText size={16}/></span>
-              {sidebarOpen && <span className="sidebar-nav-label">CV / Resume Builder</span>}
+            {(!orgSession?.restricted_tabs?.includes("resume") || !orgSession?.restricted_tabs?.includes("sop")) && (
+              <button role="tab" aria-selected={tab==="sop_resume"} className={`sidebar-nav-item${tab==="sop_resume"?" on":""}`} onClick={()=>setTab("sop_resume")} title="SOP & CV Builder">
+                <span className="sidebar-nav-icon"><BookOpen size={16}/></span>
+                {sidebarOpen && <span className="sidebar-nav-label">SOP &amp; CV Builder</span>}
+                {sopText && <span className="sidebar-nav-badge">✓</span>}
+              </button>
+            )}
+      
+      {!orgSession?.restricted_tabs?.includes("mock_interview") && (
+            <button role="tab" aria-selected={tab === "mock_interview"} 
+              className={`sidebar-nav-item${tab === "mock_interview" ? " on" : ""}`} 
+              onClick={() => setTab("mock_interview")} 
+              title="Mock Interview"
+            >
+              <span className="sidebar-nav-icon"><Mic size={16}/></span>
+              {sidebarOpen && <span className="sidebar-nav-label">AI Interview Assistant</span>}
+              {/* Optional: Add badge logic here if you want */}
             </button>
+          )}
 
-            <button role="tab" aria-selected={tab==="sop"} className={`sidebar-nav-item${tab==="sop"?" on":""}`} onClick={()=>setTab("sop")} title="SOP Builder">
-              <span className="sidebar-nav-icon"><BookOpen size={16}/></span>
-              {sidebarOpen && <span className="sidebar-nav-label">SOP Builder</span>}
-              {sopText && <span className="sidebar-nav-badge">✓</span>}
-            </button>
-
-			<div className="sidebar-nav-divider"/>
+      <div className="sidebar-nav-divider"/>
             <div className="sidebar-nav-section-label">{sidebarOpen && "Tools"}</div>
 
-            <button role="tab" aria-selected={tab==="dashboard"} className={`sidebar-nav-item${tab==="dashboard"?" on":""}`} onClick={()=>setTab("dashboard")} title="Student Dashboard">
-              <span className="sidebar-nav-icon"><LayoutDashboard size={16}/></span>
-              {sidebarOpen && <span className="sidebar-nav-label">Student Dashboard</span>}
-              {totalCases > 0 && <span className="sidebar-nav-badge">{totalCases}</span>}
-            </button>
-			
-			<button role="tab" aria-selected={tab==="match"} className={`sidebar-nav-item${tab==="match"?" on":""}`} onClick={()=>setTab("match")} title="Program Match">
-              <span className="sidebar-nav-icon"><Target size={16}/></span>
-              {sidebarOpen && <span className="sidebar-nav-label">Program Match</span>}
-              {profileData?.fullName && profileData.fullName !== "Not found" && <span className="sidebar-nav-badge">AI</span>}
-            </button>
+            {!orgSession?.restricted_tabs?.includes("dashboard") && (
+              <button role="tab" aria-selected={tab==="dashboard"} className={`sidebar-nav-item${tab==="dashboard"?" on":""}`} onClick={()=>setTab("dashboard")} title="Student Dashboard">
+                <span className="sidebar-nav-icon"><LayoutDashboard size={16}/></span>
+                {sidebarOpen && <span className="sidebar-nav-label">Student Dashboard</span>}
+                {totalCases > 0 && <span className={`sidebar-nav-badge${tab==="dashboard"?" sidebar-nav-badge--active":""}`}>{totalCases}</span>}
+                {chatUnread > 0 && tab !== "dashboard" && (
+                  <span
+                    className="sidebar-nav-badge sidebar-nav-badge--warn"
+                    title={`${chatUnread} unread chat message${chatUnread !== 1 ? "s" : ""}`}
+                    style={{ background: "rgba(29,107,232,.15)", color: "#1D6BE8" }}
+                  >
+                    💬{chatUnread}
+                  </span>
+                )}
+              </button>
+            )}
 
-            <button role="tab" aria-selected={tab==="inbox"} className={`sidebar-nav-item${tab==="inbox"?" on":""}`} onClick={()=>setTab("inbox")} title="Inbox Scanner">
-              <span className="sidebar-nav-icon"><Mail size={16}/></span>
-              {sidebarOpen && <span className="sidebar-nav-label">Inbox Scanner</span>}
-              {inboxUnread > 0 && (
-                <span className={`sidebar-nav-badge${inboxUnread > 0 ? " sidebar-nav-badge--warn" : ""}`}>
-                  {inboxUnread}
-                </span>
-              )}
-            </button>
+            {/* Radar Intel — branch managers and owners only */}
+            {(['org_owner','branch_manager'].includes(orgSession?.role) || !orgSession?.access_token) && !orgSession?.restricted_tabs?.includes("radar_intel") && (
+              <button role="tab" aria-selected={tab==="radar_intel"} className={`sidebar-nav-item${tab==="radar_intel"?" on":""}`} onClick={()=>setTab("radar_intel")} title="Radar Intel">
+                <span className="sidebar-nav-icon"><BarChart3 size={16}/></span>
+                {sidebarOpen && <span className="sidebar-nav-label">Lead Generator</span>}
+                {totalCases > 0 && <span className={`sidebar-nav-badge${tab==="radar_intel"?" sidebar-nav-badge--active":""}`} style={{ background: tab==="radar_intel"?'var(--p)':'rgba(76,29,149,.15)', color: tab==="radar_intel"?'#fff':'#4C1D95' }}>AI</span>}
+              </button>
+            )}
 
-            <button role="tab" aria-selected={tab==="calendar"} className={`sidebar-nav-item${tab==="calendar"?" on":""}`} onClick={()=>setTab("calendar")} title="Calendar">
-              <span className="sidebar-nav-icon"><Calendar size={16}/></span>
-              {sidebarOpen && <span className="sidebar-nav-label">Calendar</span>}
-            </button>
+            {!orgSession?.restricted_tabs?.includes("match") && (
+        <button role="tab" aria-selected={tab==="match"} className={`sidebar-nav-item${tab==="match"?" on":""}`} onClick={()=>setTab("match")} title="Program Match">
+                <span className="sidebar-nav-icon"><Target size={16}/></span>
+                {sidebarOpen && <span className="sidebar-nav-label">Program Match</span>}
+                {profileData?.fullName && profileData.fullName !== "Not found" && <span className={`sidebar-nav-badge${tab==="match"?" sidebar-nav-badge--active":""}`}>AI</span>}
+              </button>
+            )}
 
-            <button role="tab" aria-selected={tab==="expiry"} className={`sidebar-nav-item${tab==="expiry"?" on":""}`} onClick={()=>setTab("expiry")} title="Expiry Radar">
-              <span className="sidebar-nav-icon"><Clock size={16}/></span>
-              {sidebarOpen && <span className="sidebar-nav-label">Expiry Radar</span>}
-              {cases.filter(c=>c.expiryDate&&Math.ceil((new Date(c.expiryDate)-new Date())/86400000)<=30).length > 0 && (
-                <span className="sidebar-nav-badge sidebar-nav-badge--warn">
-                  {cases.filter(c=>c.expiryDate&&Math.ceil((new Date(c.expiryDate)-new Date())/86400000)<=30).length}
-                </span>
-              )}
-            </button>
+            {!orgSession?.restricted_tabs?.includes("inbox") && (
+              <button role="tab" aria-selected={tab==="inbox"} className={`sidebar-nav-item${tab==="inbox"?" on":""}`} onClick={()=>setTab("inbox")} title="Inbox Scanner">
+                <span className="sidebar-nav-icon"><Mail size={16}/></span>
+                {sidebarOpen && <span className="sidebar-nav-label">Inbox Scanner</span>}
+                {inboxUnread > 0 && (
+                  <span className={`sidebar-nav-badge${tab==="inbox" ? " sidebar-nav-badge--active" : " sidebar-nav-badge--warn"}`}>
+                    {inboxUnread}
+                  </span>
+                )}
+              </button>
+            )}
 
-            <button role="tab" aria-selected={tab==="policy"} className={`sidebar-nav-item${tab==="policy"?" on":""}`} onClick={()=>setTab("policy")} title="Policy Alerts">
-              <span className="sidebar-nav-icon"><Bell size={16}/></span>
-              {sidebarOpen && <span className="sidebar-nav-label">Policy Alerts</span>}
-              {policyAlerts.length > 0 && (
-                <span className={`sidebar-nav-badge${policyAlerts.some(a=>a.severity==="high")?" sidebar-nav-badge--warn":""}`}>
-                  {policyAlerts.length}
-                </span>
-              )}
-            </button>
+            {!orgSession?.restricted_tabs?.includes("calendar") && (
+              <button role="tab" aria-selected={tab==="calendar"} className={`sidebar-nav-item${tab==="calendar"?" on":""}`} onClick={()=>setTab("calendar")} title="Calendar">
+                <span className="sidebar-nav-icon"><Calendar size={16}/></span>
+                {sidebarOpen && <span className="sidebar-nav-label">Calendar</span>}
+              </button>
+            )}
 
-			<button role="tab" aria-selected={tab==="history"} className={`sidebar-nav-item${tab==="history"?" on":""}`} onClick={()=>setTab("history")} title="Case History">
-              <span className="sidebar-nav-icon"><FolderOpen size={16}/></span>
-              {sidebarOpen && <span className="sidebar-nav-label">Case History</span>}
-            </button>
+            {!orgSession?.restricted_tabs?.includes("expiry") && (
+              <button role="tab" aria-selected={tab==="expiry"} className={`sidebar-nav-item${tab==="expiry"?" on":""}`} onClick={()=>setTab("expiry")} title="Expiry Radar">
+                <span className="sidebar-nav-icon"><Clock size={16}/></span>
+                {sidebarOpen && <span className="sidebar-nav-label">Expiry Radar</span>}
+                {cases.filter(c=>c.expiryDate&&Math.ceil((new Date(c.expiryDate)-new Date())/86400000)<=30).length > 0 && (
+                  <span className="sidebar-nav-badge sidebar-nav-badge--warn">
+                    {cases.filter(c=>c.expiryDate&&Math.ceil((new Date(c.expiryDate)-new Date())/86400000)<=30).length}
+                  </span>
+                )}
+              </button>
+            )}
+
+            {!orgSession?.restricted_tabs?.includes("policy") && (
+              <button role="tab" aria-selected={tab==="policy"} className={`sidebar-nav-item${tab==="policy"?" on":""}`} onClick={()=>setTab("policy")} title="Policy Alerts">
+                <span className="sidebar-nav-icon"><Bell size={16}/></span>
+                {sidebarOpen && <span className="sidebar-nav-label">Policy Alerts</span>}
+                {policyAlerts.length > 0 && (
+                  <span className={`sidebar-nav-badge${policyAlerts.some(a=>a.severity==="high")?" sidebar-nav-badge--warn":""}`}>
+                    {policyAlerts.length}
+                  </span>
+                )}
+              </button>
+            )}
+
+            {!orgSession?.restricted_tabs?.includes("history") && (
+        <button role="tab" aria-selected={tab==="history"} className={`sidebar-nav-item${tab==="history"?" on":""}`} onClick={()=>setTab("history")} title="Case History">
+                <span className="sidebar-nav-icon"><FolderOpen size={16}/></span>
+                {sidebarOpen && <span className="sidebar-nav-label">Case History</span>}
+              </button>
+            )}
             
             {/* Agency Panel — only visible to branch_manager+ or legacy sessions */}
             {(['org_owner','branch_manager','senior_counsellor'].includes(orgSession?.role) || !orgSession?.access_token) && (
@@ -9254,11 +8819,13 @@ Previous Score: ${results.eligibility.overallScore}/100 | Missing: ${(results.mi
                   {sidebarOpen && <span className="sidebar-nav-label">Agency Panel</span>}
                 </button>
 
-                <button role="tab" aria-selected={tab==="requirements"} className={`sidebar-nav-item${tab==="requirements"?" on":""}`} onClick={()=>setTab("requirements")} title="University Data">
-                  <span className="sidebar-nav-icon"><FileSpreadsheet size={16}/></span>
-                  {sidebarOpen && <span className="sidebar-nav-label">University Data</span>}
-                  {customRequirements && <span className="sidebar-nav-badge">CSV</span>}
-                </button>
+                {!orgSession?.restricted_tabs?.includes("requirements") && (
+                  <button role="tab" aria-selected={tab==="requirements"} className={`sidebar-nav-item${tab==="requirements"?" on":""}`} onClick={()=>setTab("requirements")} title="University Data">
+                    <span className="sidebar-nav-icon"><FileSpreadsheet size={16}/></span>
+                    {sidebarOpen && <span className="sidebar-nav-label">University Data</span>}
+                    {customRequirements && <span className="sidebar-nav-badge">CSV</span>}
+                  </button>
+                )}
               </>
             )}
           </nav>
@@ -9294,17 +8861,28 @@ Previous Score: ${results.eligibility.overallScore}/100 | Missing: ${(results.mi
                     {((orgSession.plan||"starter").charAt(0).toUpperCase()+(orgSession.plan||"starter").slice(1))}
                   </span>
                 </div>
-                <div className="sidebar-credits-row">
-                  <div className="sidebar-credits-track">
-                    <div className="sidebar-credits-fill" style={{
-                      width:`${Math.min(orgSession.analyses_total>0?Math.round(((orgCredits??orgSession.analyses_remaining??0)/orgSession.analyses_total)*100):100,100)}%`,
-                      background:(orgCredits??orgSession.analyses_remaining??0)<=10?"var(--err)":(orgCredits??orgSession.analyses_remaining??0)<=50?"var(--warn)":"var(--p)",
-                    }}/>
-                  </div>
-                  <span className="sidebar-credits-label" style={{color:(orgCredits??orgSession.analyses_remaining??0)<=10?"var(--err)":(orgCredits??orgSession.analyses_remaining??0)<=50?"var(--warn)":"var(--t3)"}}>
-                    {(orgCredits??orgSession.analyses_remaining??0).toLocaleString()} left
-                  </span>
-                </div>
+                              <div className="sidebar-credits-row">
+                                  {orgSession.credit_quota !== null && orgSession.credit_quota !== undefined ? (
+                                      <div style={{ display: "flex", flexDirection: "column", gap: "4px", width: "100%" }}>
+                                          <span className="sidebar-credits-label" style={{ color: "var(--t2)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                                              <span>Personal Limit:</span>
+                                              <strong style={{ color: "var(--p)", fontSize: 12 }}>{orgSession.credit_quota}</strong>
+                                          </span>
+                                      </div>
+                                  ) : (
+                                      <>
+                                          <div className="sidebar-credits-track">
+                                              <div className="sidebar-credits-fill" style={{
+                                                  width: `${Math.min(orgSession.analyses_total > 0 ? Math.round(((orgCredits ?? orgSession.analyses_remaining ?? 0) / orgSession.analyses_total) * 100) : 100, 100)}%`,
+                                                  background: (orgCredits ?? orgSession.analyses_remaining ?? 0) <= 10 ? "var(--err)" : (orgCredits ?? orgSession.analyses_remaining ?? 0) <= 50 ? "var(--warn)" : "var(--p)",
+                                              }} />
+                                          </div>
+                                          <span className="sidebar-credits-label" style={{ color: (orgCredits ?? orgSession.analyses_remaining ?? 0) <= 10 ? "var(--err)" : (orgCredits ?? orgSession.analyses_remaining ?? 0) <= 50 ? "var(--warn)" : "var(--t3)" }}>
+                                              {(orgCredits ?? orgSession.analyses_remaining ?? 0).toLocaleString()} left
+                                          </span>
+                                      </>
+                                  )}
+                              </div>
               </div>
             )}
 
@@ -9653,58 +9231,521 @@ Previous Score: ${results.eligibility.overallScore}/100 | Missing: ${(results.mi
                     {profileDirty&&!reassessing&&<span className="toolbar-dirty-badge"><Edit3 size={10}/>Unsaved edits · auto-saving…</span>}
                   </div>
 
-                  {/* ── TWO-COLUMN RESULTS LAYOUT ── */}
-                  <div className="results-grid">
-                    <div className="results-col-left">
-                      <div className="analyzer-section-label">Student Details</div>
-                      <ProfileCard data={profileData} setData={setProfileDataDirty} preferredOfferIndex={preferredOfferIndex} setPreferredOfferIndex={setPreferredOfferIndex} requirementsData={mergedRequirements}/>
-                      <ExpiryCard
-                        profileData={profileData}
-                        expiryDates={expiryDates}
-                        setExpiryDates={setExpiryDates}
-                        onDirty={() => setExpiryDirty(true)}
-                      />
-                      {expiryDirty && (
-                        <div style={{
-                          display:"flex", alignItems:"center", gap:8,
-                          margin:"8px 0 0", padding:"10px 14px",
-                          background:"rgba(217,119,6,.08)",
-                          border:"1px solid rgba(217,119,6,.3)",
-                          borderRadius:"var(--r2)", fontSize:12,
-                          color:"var(--warn)", fontWeight:600,
-                        }}>
-                          <AlertTriangle size={13} style={{flexShrink:0}}/>
-                          Expiry dates changed — press <strong style={{margin:"0 4px"}}>Save to History</strong> before leaving this tab
+                  {/* ── NEW: SIDEBAR + CONTENT + HOVERING COUNSELLOR LAYOUT ── */}
+                  <div className="vl-analyzer-layout">
+
+                    {/* ── LEFT COLUMN: SIDEBAR + DETECTED DOCS PANEL ── */}
+                    <div style={{display:"flex",flexDirection:"column",gap:12,marginRight:16,alignSelf:"start",position:"sticky",top:72}}>
+
+                    {/* LEFT SIDEBAR: TABBED NAVIGATION */}
+                    <div className="vl-analyzer-sidebar" style={{position:"static",marginRight:0,maxHeight:"none",overflow:"hidden"}}>
+
+                      {/* Student identity strip — dark purple */}
+                      <div className="vl-sidebar-identity">
+                        <div className="vl-sidebar-avatar">
+                          {(profileData?.fullName && profileData.fullName !== "Not found"
+                            ? profileData.fullName.trim().split(/\s+/).slice(0,2).map(w=>w[0].toUpperCase()).join("")
+                            : "?")}
+                        </div>
+                        <div className="vl-sidebar-id-info">
+                          <div className="vl-sidebar-id-name">
+                            {profileData?.fullName && profileData.fullName !== "Not found" ? profileData.fullName : "Unknown Student"}
+                          </div>
+                          <div className="vl-sidebar-id-meta">
+                            {(() => { const _serial = cases.find(c=>c.id===activeCaseId)?.caseSerial || null; return _serial ? (
+                              <span className="vl-sidebar-id-case">{_serial}</span>
+                            ) : null; })()}
+                            {profileData?.passportNumber && profileData.passportNumber !== "Not found" && (
+                              <span className="vl-sidebar-id-passport">
+                                <span style={{opacity:.7,fontSize:9}}>PPT</span> {profileData.passportNumber}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Navigation tabs */}
+                      <nav className="vl-sidebar-nav">
+                        {[
+                          { id: "personal",   label: "Personal",        icon: <User size={14}/>,          count: null },
+                          { id: "academic",   label: "Academic",         icon: <GraduationCap size={14}/>, count: null },
+                          { id: "english",    label: "English",          icon: <Languages size={14}/>,     count: (profileData?.englishTests||[]).filter(t=>t.overallScore).length || null },
+                          { id: "financial",  label: "Financial",        icon: <CreditCard size={14}/>,    count: null },
+                          { id: "offers",     label: "Offers & CAS",     icon: <FileText size={14}/>,      count: (Array.isArray(profileData?.offerLetters)?profileData.offerLetters.filter(o=>o.university||o.country).length:0) || null },
+                          { id: "documents",  label: "Special Docs",     icon: <ShieldCheck size={14}/>,   count: (profileData?.detectedDocs||[]).length || null },
+                          { id: "expiry",     label: "Expiry Tracker",   icon: <Clock size={14}/>,         count: null },
+                          { divider: true },
+                          { id: "assessment", label: "Visa Eligibility", icon: <BarChart3 size={14}/>,     count: null },
+                          { id: "risks",      label: "Risk Flags",       icon: <AlertTriangle size={14}/>, count: (results?.redFlags||[]).length || null },
+                        ].map((tab, tabIdx) => {
+                          if (tab.divider) return <div key={`div-${tabIdx}`} className="vl-sidebar-divider"/>;
+                          return (
+                          <button
+                            key={tab.id}
+                            className={`vl-sidebar-tab${analyzerSideTab === tab.id ? " active" : ""}`}
+                            onClick={() => {
+                              setAnalyzerSideTab(tab.id);
+                              if (tab.id === "assessment") {
+                                setTimeout(() => {
+                                  document.getElementById("vl-elig-anchor")?.scrollIntoView({behavior:"smooth", block:"start"});
+                                }, 50);
+                              }
+                            }}
+                          >
+                            <span className="vl-sidebar-tab-icon">{tab.icon}</span>
+                            <span className="vl-sidebar-tab-label">{tab.label}</span>
+                            {tab.count > 0 && (
+                              <span className="vl-sidebar-tab-badge">{tab.count}</span>
+                            )}
+                          </button>
+                          );
+                        })}
+                      </nav>
+                    </div>{/* end vl-analyzer-sidebar */}
+
+                   {/* ── DETECTED DOCUMENTS PANEL ── */}
+<div className="vl-sidebar-docs-panel">
+  <div className="vl-sidebar-docs-panel-hdr">
+    <File size={13}/>
+    <span>Detected Documents</span>
+    {(() => { const n = deriveDetectedDocs(profileData, results, docs, docTypes, cases.find(c=>c.id===activeCaseId)?.docList).length; return n > 0 && <span className="vl-sidebar-docs-badge">{n}</span>; })()}
+  </div>
+  <div className="vl-sidebar-docs-list">
+    {(() => {
+      const detectedList = deriveDetectedDocs(profileData, results, docs, docTypes, cases.find(c=>c.id===activeCaseId)?.docList);
+      if (detectedList.length === 0) return <div className="vl-sidebar-docs-empty">No documents loaded</div>;
+      return detectedList.map((item, i) => (
+        <div key={i} className="vl-sidebar-doc-row">
+          <div className="vl-sidebar-doc-ext" style={{background:`${item.color}18`,color:item.color,borderColor:`${item.color}30`,fontSize:14,display:'flex',alignItems:'center',justifyContent:'center',width:28,height:28,flexShrink:0,borderRadius:4,border:'1px solid'}}>
+            {item.icon}
+          </div>
+          <div className="vl-sidebar-doc-info">
+            <div className="vl-sidebar-doc-name" style={{display:'flex',alignItems:'center',gap:4}}>
+              {item.label}
+              {item.status === 'expired' && <span style={{fontSize:9,fontWeight:700,color:'#DC2626',background:'rgba(220,38,38,.1)',borderRadius:3,padding:'1px 4px'}}>EXPIRED</span>}
+              {item.status === 'partial' && <span style={{fontSize:9,fontWeight:700,color:'#B45309',background:'rgba(180,83,9,.1)',borderRadius:3,padding:'1px 4px'}}>PARTIAL</span>}
+            </div>
+            {item.detail && <div className="vl-sidebar-doc-type" style={{color:item.color}}>{item.detail}</div>}
+            <div style={{fontSize:9,color:'var(--t3)',fontFamily:'var(--fm)',marginTop:1}}>{item.source==='ai'?'AI extracted':item.source==='db'?'Saved case':item.source==='file'?'Uploaded file':'Detected'}</div>
+          </div>
+        </div>
+      ));
+    })()}
+  </div>
+</div>
+
+                    </div>{/* end left column wrapper */}
+
+                    {/* ── MAIN CONTENT PANEL ── */}
+                    <div className="vl-analyzer-content">
+
+                      {/* Hidden renders to preserve ProfileCard state for all groups */}
+                      <div style={{display:"none"}}>
+                        <ProfileCard data={profileData} setData={setProfileDataDirty} preferredOfferIndex={preferredOfferIndex} setPreferredOfferIndex={setPreferredOfferIndex} requirementsData={mergedRequirements}/>
+                      </div>
+
+                      {/* ── PERSONAL TAB ── */}
+                      {analyzerSideTab === "personal" && (
+                        <div className="vl-content-section">
+                          <div className="vl-content-section-header vl-header-purple">
+                            <User size={16}/>
+                            <span>Personal Information</span>
+                          </div>
+                          <div className="vl-field-grid">
+                            {[
+                              {k:"fullName",           l:"Full Name"},
+                              {k:"dob",                l:"Date of Birth"},
+                              {k:"nationality",        l:"Nationality"},
+                              {k:"gender",             l:"Gender"},
+                              {k:"city",               l:"City"},
+                              {k:"mobileNumber",       l:"Mobile Number"},
+                              {k:"email",              l:"Email Address"},
+                              {k:"passportNumber",     l:"Passport Number"},
+                              {k:"passportIssueDate",  l:"Passport Issued"},
+                              {k:"passportExpiry",     l:"Passport Expiry"},
+                              {k:"cnicNumber",         l:"CNIC Number"},
+                              {k:"cnicExpiry",         l:"CNIC Expiry"},
+                            ].map(f => {
+                              const raw = profileData[f.k];
+                              const isEmpty = !raw || raw === "Not found" || raw.trim() === "";
+                              return (
+                                <div key={f.k} className="vl-field-row">
+                                  <div className="vl-field-label">{f.l}</div>
+                                  <input
+                                    className={`vl-field-input${isEmpty ? " vl-field-notfound" : ""}`}
+                                    value={isEmpty ? "" : raw}
+                                    onChange={e => setProfileDataDirty(p => ({...p, [f.k]: e.target.value}))}
+                                    placeholder="NOT FOUND"
+                                  />
+                                  {!isEmpty && (
+                                    <button className="vl-field-copy" onClick={() => navigator.clipboard?.writeText(raw)} title="Copy">
+                                      <Copy size={11}/>
+                                    </button>
+                                  )}
+                                </div>
+                              );
+                            })}
+                            {/* CNIC Address full-width */}
+                            <div className="vl-field-row vl-field-row-full">
+                              <div className="vl-field-label">CNIC Address (Roman Urdu)</div>
+                              <textarea
+                                className={`vl-field-input vl-field-textarea${(!profileData.cnicAddressRomanUrdu || profileData.cnicAddressRomanUrdu === "Not found") ? " vl-field-notfound" : ""}`}
+                                value={profileData.cnicAddressRomanUrdu && profileData.cnicAddressRomanUrdu !== "Not found" ? profileData.cnicAddressRomanUrdu : ""}
+                                onChange={e => setProfileDataDirty(p => ({...p, cnicAddressRomanUrdu: e.target.value}))}
+                                placeholder="NOT FOUND"
+                                rows={2}
+                              />
+                            </div>
+                          </div>
+                          {/* Name mismatches */}
+                          {Array.isArray(profileData?.nameMismatches) && profileData.nameMismatches.length > 0 && (
+                            <div className="vl-mismatch-section">
+                              <div className="vl-mismatch-header"><AlertCircle size={13} color="var(--err)"/>Name Mismatches Detected</div>
+                              {profileData.nameMismatches.map((m,i) => (
+                                <div key={i} className="vl-mismatch-row">
+                                  <span className="vl-mismatch-doc">{m.documentName}</span>
+                                  <span className="vl-mismatch-found">{m.nameFound}</span>
+                                  {m.issue && <span className="vl-mismatch-issue">{m.issue}</span>}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          {/* Study gap */}
+                          {profileData?.studyGap && profileData.studyGap !== "Not found" && profileData.studyGap !== "" && (
+                            <div className="vl-alert-strip vl-alert-warn">
+                              <Clock size={13} style={{flexShrink:0}}/>
+                              <div><strong>Study Gap Detected</strong><br/>{profileData.studyGap}</div>
+                            </div>
+                          )}
                         </div>
                       )}
-                    </div>
-                    <div className="results-col-right">
-                      <div className="analyzer-section-label">Assessment</div>
-                      <UniversityChecker profile={profileData} requirementsData={mergedRequirements} preferredOfferIndex={preferredOfferIndex}/>
-                      {(liveElig||results.eligibility) && <EligCard data={liveElig||results.eligibility} summary={results.eligibility?.summary} findings={results.eligibility?.findings} profile={profileData} isLive={!!liveElig}/>}
-                      <MissingCard items={results.missingDocuments||[]}/>
-                      <FlagsCard flags={results.redFlags||[]}/>
-                      <RejectionsCard items={results.rejections||[]}/>
-                    </div>
-                  </div>
 
-                  {/* ── FULL-WIDTH SECONDARY CARDS ── */}
-                  <div className="results-secondary">
-                    <div className="analyzer-section-label">Actions</div>
-                    <NotesCard
-                      notes={notes} setNotes={setNotes}
-                      onSave={handleSaveNotes} onSaveCase={handleSaveCase}
-                      savedMsg={savedMsg}
-                      counsellorName={counsellorName} setCounsellorName={setCounsellorName}
-                      leadStatus={leadStatus} setLeadStatus={setLeadStatus}
-                      cases={cases} activeCaseId={activeCaseId}
-                      activeCaseSerial={cases.find(c=>c.id===activeCaseId)?.caseSerial || null}
-                      applicationTargets={applicationTargets} setApplicationTargets={setApplicationTargets}
-                      requirementsData={mergedRequirements}
-                      profileData={profileData} preferredOfferIndex={preferredOfferIndex}
-                      orgSession={orgSession}
-                    />
-                  </div>
+                      {/* ── ACADEMIC TAB ── */}
+                      {analyzerSideTab === "academic" && (
+                        <div className="vl-content-section">
+                          <div className="vl-content-section-header vl-header-purple">
+                            <GraduationCap size={16}/>
+                            <span>Academic Background</span>
+                          </div>
+                          <div className="vl-field-grid">
+                            {[
+                              {k:"program",       l:"Highest Qualification"},
+                              {k:"yearOfPassing", l:"Year of Passing"},
+                              {k:"university",    l:"University / Institution"},
+                            ].map(f => {
+                              const raw = profileData[f.k];
+                              const isEmpty = !raw || raw === "Not found" || raw.trim() === "";
+                              return (
+                                <div key={f.k} className="vl-field-row">
+                                  <div className="vl-field-label">{f.l}</div>
+                                  <input
+                                    className={`vl-field-input${isEmpty ? " vl-field-notfound" : ""}`}
+                                    value={isEmpty ? "" : raw}
+                                    onChange={e => setProfileDataDirty(p => ({...p, [f.k]: e.target.value}))}
+                                    placeholder="NOT FOUND"
+                                  />
+                                  {!isEmpty && (
+                                    <button className="vl-field-copy" onClick={() => navigator.clipboard?.writeText(raw)} title="Copy">
+                                      <Copy size={11}/>
+                                    </button>
+                                  )}
+                                </div>
+                              );
+                            })}
+                            {["academicResult","studyGap"].map(k => {
+                              const labels = {academicResult:"Academic Result / GPA", studyGap:"Study Gap"};
+                              const raw = profileData[k];
+                              const isEmpty = !raw || raw === "Not found" || raw.trim() === "";
+                              return (
+                                <div key={k} className="vl-field-row vl-field-row-full">
+                                  <div className="vl-field-label">{labels[k]}</div>
+                                  <textarea
+                                    className={`vl-field-input vl-field-textarea${isEmpty ? " vl-field-notfound" : ""}`}
+                                    value={isEmpty ? "" : raw}
+                                    onChange={e => setProfileDataDirty(p => ({...p, [k]: e.target.value}))}
+                                    placeholder="NOT FOUND"
+                                    rows={2}
+                                  />
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* ── ENGLISH TAB ── */}
+                      {analyzerSideTab === "english" && (
+                        <div className="vl-content-section">
+                          <div className="vl-content-section-header vl-header-purple">
+                            <Languages size={16}/>
+                            <span>English Qualifications</span>
+                          </div>
+                          {/* English tests */}
+                          {(profileData?.englishTests||[]).length === 0 ? (
+                            <div className="vl-empty-note">No English test certificates detected. Add manually or re-analyse with test documents.</div>
+                          ) : (
+                            <div className="vl-english-tests">
+                              {(profileData.englishTests||[]).map((test, idx) => {
+                                const typeColor = test.type==="IELTS"||test.type==="IELTS UKVI" ? "#1D6BE8" : test.type==="PTE Academic"||test.type==="PTE UKVI" ? "#7C3AED" : test.type==="TOEFL" ? "#059669" : "var(--t2)";
+                                const subKeys = ["listening","reading","writing","speaking"];
+                                const hasUrn = test.urn && test.urn.trim();
+                                function updateTest(key, val) { setProfileDataDirty(p => ({...p, englishTests: (p.englishTests||[]).map((t,j)=>j===idx?{...t,[key]:val}:t)})); }
+                                function updateSub(sub, val) { setProfileDataDirty(p => ({...p, englishTests: (p.englishTests||[]).map((t,j)=>j===idx?{...t,subScores:{...t.subScores,[sub]:val}}:t)})); }
+                                return (
+                                  <div key={idx} className="vl-english-card">
+                                    <div className="vl-english-card-hdr" style={{borderLeft:`3px solid ${typeColor}`}}>
+                                      {/* Editable test type */}
+                                      <input
+                                        className="vl-english-type-input"
+                                        value={test.type||""}
+                                        onChange={e=>updateTest("type",e.target.value)}
+                                        placeholder="Test Type"
+                                        style={{color:typeColor}}
+                                      />
+                                      {test.overallScore && <span className="vl-english-score" style={{color:typeColor}}>{test.overallScore}</span>}
+                                      {test.testDate && <span className="vl-english-date">{test.testDate}</span>}
+                                      <button className="vl-remove-btn" onClick={() => setProfileDataDirty(p => ({...p, englishTests: (p.englishTests||[]).filter((_,j)=>j!==idx)}))}>
+                                        <X size={11}/>
+                                      </button>
+                                    </div>
+                                    <div className="vl-field-grid" style={{padding:"0"}}>
+                                      <div className="vl-field-row">
+                                        <div className="vl-field-label">Overall Score</div>
+                                        <input className={`vl-field-input${!test.overallScore?" vl-field-notfound":""}`} value={test.overallScore||""} onChange={e=>updateTest("overallScore",e.target.value)} placeholder="NOT FOUND"/>
+                                      </div>
+                                      <div className="vl-field-row">
+                                        <div className="vl-field-label">Test Date</div>
+                                        <input className={`vl-field-input${!test.testDate?" vl-field-notfound":""}`} value={test.testDate||""} onChange={e=>updateTest("testDate",e.target.value)} placeholder="NOT FOUND"/>
+                                      </div>
+                                      {/* Expiry date — change 3 */}
+                                      <div className="vl-field-row vl-field-row-full">
+                                        <div className="vl-field-label">Expiry Date</div>
+                                        <input className={`vl-field-input${!test.expiryDate?" vl-field-notfound":""}`} value={test.expiryDate||""} onChange={e=>updateTest("expiryDate",e.target.value)} placeholder="NOT FOUND"/>
+                                      </div>
+                                      <div className="vl-field-row vl-field-row-full">
+                                        <div className="vl-field-label" style={{display:"flex",alignItems:"center",gap:6}}>
+                                          URN / Reference
+                                          {hasUrn && <span style={{fontSize:9,fontWeight:600,background:"rgba(2,132,199,.1)",color:"#0284C7",border:"1px solid rgba(2,132,199,.2)",borderRadius:4,padding:"1px 5px"}}>Found</span>}
+                                        </div>
+                                        <input className={`vl-field-input${!test.urn?" vl-field-notfound":""}`} style={{fontFamily:"var(--fm)",fontSize:11}} value={test.urn||""} onChange={e=>updateTest("urn",e.target.value)} placeholder="NOT FOUND"/>
+                                      </div>
+                                      {subKeys.map(sub => (
+                                        <div key={sub} className="vl-field-row">
+                                          <div className="vl-field-label" style={{textTransform:"capitalize"}}>{sub}</div>
+                                          <input className={`vl-field-input${!test.subScores?.[sub]?" vl-field-notfound":""}`} value={test.subScores?.[sub]||""} onChange={e=>updateSub(sub,e.target.value)} placeholder="—"/>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                          {/* Add test — change 4: defaults to editable "IELTS" heading */}
+                          <div style={{padding:"10px 18px 4px"}}>
+                            <button className="vl-add-btn" style={{margin:0}} onClick={() => setProfileDataDirty(p => ({...p, englishTests: [...(p.englishTests||[]), {type:"IELTS",overallScore:"",testDate:"",expiryDate:"",urn:"",subScores:{listening:"",reading:"",writing:"",speaking:""}}]}))}>
+                              <Plus size={12}/>Add English Test
+                            </button>
+                          </div>
+                          {/* Other English / MOI */}
+                          <div className="vl-field-grid" style={{marginTop:0}}>
+                            {[
+                              {k:"otherEnglishTest", l:"Other English Test / Certificate"},
+                              {k:"otherEnglishTestExpiry", l:"Other Test Expiry"},
+                            ].map(f => {
+                              const raw = profileData[f.k];
+                              const isEmpty = !raw || raw === "Not found" || raw.trim() === "";
+                              return (
+                                <div key={f.k} className="vl-field-row vl-field-row-full">
+                                  <div className="vl-field-label">{f.l}</div>
+                                  <input className={`vl-field-input${isEmpty?" vl-field-notfound":""}`} value={isEmpty?"":raw} onChange={e=>setProfileDataDirty(p=>({...p,[f.k]:e.target.value}))} placeholder="NOT FOUND"/>
+                                </div>
+                              );
+                            })}
+                            <div className="vl-field-row vl-field-row-full">
+                              <div className="vl-field-label">Medium of Instruction</div>
+                              <textarea className={`vl-field-input vl-field-textarea${(!profileData.mediumOfInstruction||profileData.mediumOfInstruction==="Not found")?" vl-field-notfound":""}`} value={profileData.mediumOfInstruction && profileData.mediumOfInstruction !== "Not found" ? profileData.mediumOfInstruction : ""} onChange={e => setProfileDataDirty(p => ({...p, mediumOfInstruction: e.target.value}))} placeholder="NOT FOUND" rows={2}/>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* ── FINANCIAL TAB ── */}
+                      {analyzerSideTab === "financial" && (
+                        <div className="vl-content-section">
+                          <div className="vl-content-section-header vl-header-purple">
+                            <CreditCard size={16}/>
+                            <span>Financial Information</span>
+                          </div>
+                          <div className="vl-field-grid">
+                            {[
+                              {k:"financialHolder",  l:"Account Holder"},
+                              {k:"bankName",         l:"Bank Name"},
+                              {k:"financialBalance", l:"Funds Available (from documents)"},
+                            ].map(f => {
+                              const raw = profileData[f.k];
+                              const isEmpty = !raw || raw === "Not found" || raw.trim() === "";
+                              return (
+                                <div key={f.k} className="vl-field-row vl-field-row-full">
+                                  <div className="vl-field-label">{f.l}</div>
+                                  <input className={`vl-field-input${isEmpty?" vl-field-notfound":""}`} value={isEmpty?"":raw} onChange={e=>setProfileDataDirty(p=>({...p,[f.k]:e.target.value}))} placeholder="NOT FOUND"/>
+                                </div>
+                              );
+                            })}
+                            <div className="vl-field-row vl-field-row-full">
+                              <div className="vl-field-label" style={{display:"flex",alignItems:"center",gap:6}}>
+                                Funds Required
+                                {profileData.fundsRequiredSource === "auto" && profileData.fundsRequiredLabel && (
+                                  <span style={{fontSize:9,fontWeight:600,background:"rgba(29,107,232,.1)",color:"var(--p)",border:"1px solid rgba(29,107,232,.2)",borderRadius:4,padding:"1px 5px"}}>Auto · {profileData.fundsRequiredLabel}</span>
+                                )}
+                                {profileData.fundsRequiredSource === "manual" && (
+                                  <span style={{fontSize:9,fontWeight:600,background:"rgba(245,158,11,.1)",color:"var(--warn)",border:"1px solid rgba(245,158,11,.2)",borderRadius:4,padding:"1px 5px"}}>Edited</span>
+                                )}
+                              </div>
+                              <input
+                                className={`vl-field-input${(!profileData.fundsRequired||profileData.fundsRequired.trim()==="")?" vl-field-notfound":""}`}
+                                value={profileData.fundsRequired||""}
+                                onChange={e => setProfileDataDirty(p => ({...p, fundsRequired: e.target.value, fundsRequiredSource: e.target.value.trim() ? "manual" : (p.fundsRequiredSource === "auto" ? "auto" : null)}))}
+                                placeholder="NOT FOUND"
+                              />
+                            </div>
+                          </div>
+                          {/* Sufficiency banner — stable key prevents state reset on each render */}
+                          <div style={{padding:"0 0 2px"}}>
+                            <FundsSufficiencyBanner
+                              key={`fsb-${profileData.financialBalance||""}-${profileData.fundsRequired||""}`}
+                              balance={profileData.financialBalance}
+                              required={profileData.fundsRequired}
+                            />
+                          </div>
+                        </div>
+                      )}
+
+                      {/* ── OFFERS & CAS TAB ── */}
+                      {analyzerSideTab === "offers" && (
+                        <div className="vl-content-section">
+                          <div className="vl-content-section-header">
+                            <FileText size={16} color="var(--p)"/>
+                            <span>Offer Letters &amp; CAS Documents</span>
+                          </div>
+                          <OfferLettersSection data={profileData} setData={setProfileDataDirty} preferredIdx={preferredOfferIndex} setPreferredIdx={setPreferredOfferIndex}/>
+                          <CasDocumentsSection data={profileData} setData={setProfileDataDirty}/>
+                        </div>
+                      )}
+
+                      {/* ── SPECIAL DOCS TAB ── */}
+                      {analyzerSideTab === "documents" && (
+                        <div className="vl-content-section">
+                          <div className="vl-content-section-header">
+                            <ShieldCheck size={16} color="#7C3AED"/>
+                            <span>Detected Special Documents</span>
+                            {(profileData?.detectedDocs||[]).length > 0 && (
+                              <span className="badge b-info" style={{marginLeft:"auto",fontSize:9}}>{profileData.detectedDocs.length} detected</span>
+                            )}
+                          </div>
+                          <DetectedDocsCard profileData={profileData}/>
+                        </div>
+                      )}
+
+                      {/* ── EXPIRY TAB ── */}
+                      {analyzerSideTab === "expiry" && (
+                        <div className="vl-content-section">
+                          <div className="vl-content-section-header">
+                            <Clock size={16} color="var(--warn)"/>
+                            <span>Expiry Tracker</span>
+                          </div>
+                          <ExpiryCard
+                            profileData={profileData}
+                            expiryDates={expiryDates}
+                            setExpiryDates={setExpiryDates}
+                            onDirty={() => setExpiryDirty(true)}
+                          />
+                          {expiryDirty && (
+                            <div className="vl-alert-strip vl-alert-warn" style={{marginTop:12}}>
+                              <AlertTriangle size={13} style={{flexShrink:0}}/>
+                              Expiry dates changed — press <strong style={{margin:"0 4px"}}>Save to History</strong> before leaving this tab
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* ── ASSESSMENT TAB ── */}
+                      {analyzerSideTab === "assessment" && (
+                        <div className="vl-content-section">
+                          <UniversityChecker profile={profileData} requirementsData={mergedRequirements} preferredOfferIndex={preferredOfferIndex}/>
+                          {(liveElig||results.eligibility) && <EligCard data={liveElig||results.eligibility} summary={results.eligibility?.summary} findings={results.eligibility?.findings} profile={profileData} isLive={!!liveElig}/>}
+                        </div>
+                      )}
+
+                      {/* ── RISKS TAB ── */}
+                      {analyzerSideTab === "risks" && (
+                        <div className="vl-content-section">
+                          <div className="vl-content-section-header">
+                            <AlertTriangle size={16} color="var(--err)"/>
+                            <span>Risk Flags &amp; Notable Findings</span>
+                          </div>
+                          <div style={{padding:"14px 16px"}}>
+                            <RisksCard
+                              flags={results.redFlags||[]}
+                              missingItems={results.missingDocuments||[]}
+                              rejections={results.rejections||[]}
+                            />
+                          </div>
+                        </div>
+                      )}
+
+                      {/* ── VISA ELIGIBILITY — always visible at bottom of every tab ── */}
+                      {analyzerSideTab !== "assessment" && (liveElig||results.eligibility) && (
+                        <div id="vl-elig-anchor" className="vl-content-section" style={{marginTop:14}}>
+                          <EligCard data={liveElig||results.eligibility} summary={results.eligibility?.summary} findings={results.eligibility?.findings} profile={profileData} isLive={!!liveElig}/>
+                        </div>
+                      )}
+
+                    </div>{/* end vl-analyzer-content */}
+
+                    {/* ── HOVERING COUNSELLOR PANEL (right) ── */}
+                    <div className="vl-counsellor-hover">
+                      <NotesCard
+                        notes={notes} setNotes={setNotes}
+                        onSave={handleSaveNotes} onSaveCase={handleSaveCase}
+                        savedMsg={savedMsg}
+                        counsellorName={counsellorName} setCounsellorName={setCounsellorName}
+                        leadStatus={leadStatus} setLeadStatus={setLeadStatus}
+                        cases={cases} activeCaseId={activeCaseId}
+                        activeCaseSerial={cases.find(c=>c.id===activeCaseId)?.caseSerial || null}
+                        applicationTargets={applicationTargets} setApplicationTargets={setApplicationTargets}
+                        requirementsData={mergedRequirements}
+                        profileData={profileData} preferredOfferIndex={preferredOfferIndex}
+                        orgSession={orgSession}
+                        orgMembers={orgMembers}
+                      />
+                    </div>
+
+                  </div>{/* end vl-analyzer-layout */}
+
+                  {/* ── FLOATING CHAT PILL (bottom-right) ── */}
+                  {!orgSession?.restricted_tabs?.includes("chat") && (
+                    <>
+                      {chatOpen && (
+                        <div className="vl-chat-popover">
+                          <ChatPanel
+                            profileData={profileData}
+                            results={results}
+                            docs={docs}
+                            messages={chatMessages}
+                            setMessages={setChatMessages}
+                            onCreditsUpdate={setOrgCredits}
+                          />
+                        </div>
+                      )}
+                      <button className="vl-chat-pill" onClick={() => setChatOpen(o => !o)}>
+                        {chatOpen
+                          ? <><X size={15}/>Close Chat</>
+                          : <><MessageSquare size={15}/>AI Chat{chatMessages.length > 0 && <span className="vl-chat-pill-dot has-messages"/>}</>
+                        }
+                      </button>
+                    </>
+                  )}
                 </>
               )}
             </>
@@ -9728,39 +9769,66 @@ Previous Score: ${results.eligibility.overallScore}/100 | Missing: ${(results.mi
             </>
           )}
 
-          {/* ── RESUME ── */}
-          {tab==="resume"&&(
+          {/* ── SOP + RESUME (combined 2-panel) ── */}
+          {tab==="sop_resume"&&(
             <>
               <div className="pg-hdr">
-                <h1 className="pg-title">Resume <em>Writer</em></h1>
-                <p className="pg-sub">Generate and edit a professional, ATS-friendly CV based on the student's extracted data</p>
+                <h1 className="pg-title">SOP &amp; CV <em>Builder</em></h1>
+                <p className="pg-sub">Generate your Statement of Purpose and professional CV side by side — all in one view</p>
               </div>
-              {/* UPDATE THIS LINE TO PASS THE PROPS */}
-              <ResumeBuilder profileData={profileData} results={results} resume={resumeText} setResume={setResumeText} onSaveResume={handleSaveCase} />
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20,alignItems:"start"}}>
+                {/* Left panel — SOP */}
+                <div style={{minWidth:0}}>
+                  <div style={{fontWeight:700,fontSize:13,color:"var(--t2)",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:12,paddingBottom:8,borderBottom:"1px solid var(--bd)"}}>
+                    📄 Statement of Purpose
+                  </div>
+                  <SOPBuilder
+                    profileData={profileData}
+                    results={results}
+                    universitySop={universitySop}
+                    visaSop={visaSop}
+                    setUniversitySop={setUniversitySop}
+                    setVisaSop={setVisaSop}
+                    onSaveSops={handleSaveCase}
+                    preferredOfferIndex={preferredOfferIndex}
+                    requirementsData={mergedRequirements}
+                  />
+                </div>
+                {/* Right panel — Resume */}
+                <div style={{minWidth:0}}>
+                  <div style={{fontWeight:700,fontSize:13,color:"var(--t2)",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:12,paddingBottom:8,borderBottom:"1px solid var(--bd)"}}>
+                    📋 CV / Resume
+                  </div>
+                  <ResumeBuilder profileData={profileData} results={results} resume={resumeText} setResume={setResumeText} onSaveResume={handleSaveCase} />
+                </div>
+              </div>
             </>
           )}
-
-          {/* ── SOP BUILDER ── */}
-          {tab==="sop"&&(
+      
+      {/* ── Mock Interview ── */}
+          {tab==="mock_interview"&&(
             <>
               <div className="pg-hdr">
-                <h1 className="pg-title">SOP <em>Builder</em></h1>
-                <p className="pg-sub">Generate a high-conversion Statement of Purpose · two versions: University &amp; Visa Intent · saves with the case</p>
+                <h1 className="pg-title">AI Interview <em>Assistant</em></h1>
+                <p className="pg-sub">Voice-to-voice AI practice sessions for University and Embassy interviews</p>
               </div>
-              <SOPBuilder
-                profileData={profileData}
-                results={results}
-                universitySop={universitySop}
-                visaSop={visaSop}
-                setUniversitySop={setUniversitySop}
-                setVisaSop={setVisaSop}
-                onSaveSops={handleSaveCase}
-                preferredOfferIndex={preferredOfferIndex}
-                requirementsData={mergedRequirements}
-              />
+              
+              {/* Check if the case is saved to the database first! */}
+              {!activeCaseId ? (
+                <div className="err-banner" style={{marginBottom:16}}>
+                  <AlertCircle size={14}/> Please click "Save to History" on the Analyse tab before starting a mock interview.
+                </div>
+              ) : (
+                <MockInterview 
+  caseId={activeCaseId}
+  mode="university" 
+  orgSession={orgSession}
+  onComplete={(report) => console.log("Interview Complete!", report)}
+/>
+              )}
             </>
           )}
-
+      
           {/* ── REQUIREMENTS ── */}
           {tab==="requirements"&&(
             <>
@@ -9776,8 +9844,8 @@ Previous Score: ${results.eligibility.overallScore}/100 | Missing: ${(results.mi
               />
             </>
           )}
-			{/* ── Program Match ── */}
-			{tab==="match" && (
+      {/* ── Program Match ── */}
+      {tab==="match" && (
   <>
     <div className="pg-hdr">
       <h1 className="pg-title">Program <em>Match</em></h1>
@@ -9788,6 +9856,7 @@ Previous Score: ${results.eligibility.overallScore}/100 | Missing: ${(results.mi
       requirementsData={mergedRequirements}
       preferredOfferIndex={preferredOfferIndex}
       onCreditsUpdate={setOrgCredits}
+      activeStudentId={activeStudentId}
     />
   </>
 )}
@@ -9801,14 +9870,34 @@ Previous Score: ${results.eligibility.overallScore}/100 | Missing: ${(results.mi
               </div>
               <StudentDashboard
                 onLoad={handleLoadCase}
+                onOpenMatcher={handleJumpToMatcher}
+                onUpdateStatus={updateCaseStatus}
                 totalCases={totalCases}
                 lastSaved={lastSaved}
                 orgSession={orgSession}
                 orgCredits={orgCredits}
                 policyAlerts={policyAlerts}
-                key={totalCases}
+                callGeminiInsight={callGeminiInsight}
+                onOpenChat={openChat}
+                openChatCount={openChats.length}
+                onPeekChange={setPeekOpen}
+                onPaymentUpdate={(caseId, newStatus) => {
+                  setCases(prev => prev.map(c => c.id === caseId ? { ...c, paymentStatus: newStatus } : c));
+                }}
               />
             </>
+          )}
+
+          {/* ── RADAR INTEL (managers/owners only) ── */}
+          {tab==="radar_intel"&&(
+            <RadarIntelPage
+              orgSession={orgSession}
+              callGeminiInsight={callGeminiInsight}
+              onOpenCase={handleLoadCase}
+              totalCases={totalCases}
+              lastSaved={lastSaved}
+              policyAlerts={policyAlerts}
+            />
           )}
 
           {/* ── POLICY ALERTS ── */}
@@ -9872,10 +9961,20 @@ Previous Score: ${results.eligibility.overallScore}/100 | Missing: ${(results.mi
   onRenameCounsellor={async (oldName, newName) => {
     await renameCounsellorInSupabase(oldName, newName);
   }}
+  onMergeCounsellors={async (sourceName, targetName) => {
+    await mergeCounsellorsInSupabase(sourceName, targetName);
+  }}
   onExpandCase={async (id) => {
     return await loadFullCase(id);
   }}
   refreshKey={totalCases}
+  orgSession={orgSession}
+  loadCasesFromSupabase={loadCasesFromSupabase}
+  loadMoreCases={loadMoreCases}
+  loadFullCase={loadFullCase}
+  searchCases={searchCases}
+  deleteCaseFromSupabase={deleteCaseFromSupabase}
+  countCasesInSupabase={countCasesInSupabase}
 />
             </>
           )}
@@ -9898,128 +9997,1128 @@ Previous Score: ${results.eligibility.overallScore}/100 | Missing: ${(results.mi
         </footer>
         </div>{/* end .app-content */}
       </div>{/* end .app */}
-    </>
+
+      {/* ── FLOATING CHAT TRAY — app-level, persists across all tab changes ── */}
+      <FloatingChatTray
+        chats={openChats}
+        onClose={closeChat}
+        onToggleMinimise={toggleChatMinimise}
+        peekOpen={peekOpen}
+      />
+    </ChatContext.Provider>
   );
 }
-/* ─── LOGIN PAGE ─────────────────────────────────────────────────────── */
-function LoginPage({ onUnlock }) {
-  const [tab,      setTab]      = useState("login");
-  const [email,    setEmail]    = useState("");
-  const [password, setPassword] = useState("");
-  const [code,     setCode]     = useState("");
-  const [error,    setError]    = useState("");
-  const [shake,    setShake]    = useState(false);
-  const [loading,  setLoading]  = useState(false);
-  const [showPw,   setShowPw]   = useState(false);
-  const inputRef = useRef(null);
+/* ════════════════════════════════════════════════════════════════════════
+   RADAR INTEL PAGE
+   Standalone full-page view of the Smart ROI Matrix + counsellor analytics.
+   Only accessible to branch_manager and org_owner roles (enforced in App nav
+   and in the tab render guard above). Loads its own cases from Supabase so
+   it works independently of any currently-loaded student in the Analyser.
+════════════════════════════════════════════════════════════════════════ */
+function RadarIntelPage({ orgSession, callGeminiInsight, onOpenCase, totalCases, lastSaved, policyAlerts = [] }) {
+  const [cases,       setCases]       = React.useState([]);
+  const [loading,     setLoading]     = React.useState(false);
+  const [lastLoaded,  setLastLoaded]  = React.useState(null);
+  const [counsellorFilter, setCounsellorFilter] = React.useState('All');
+  const [viewMode,    setViewMode]    = React.useState('radar');  // 'radar' | 'perf'
+  const [orgMembers,  setOrgMembers]  = React.useState([]); // active profiles from DB
+  const geminiCache   = React.useRef(new Map());
 
-  useEffect(() => { inputRef.current?.focus(); }, [tab]);
+  // Fetch active org members so counsellorList reflects real users, not legacy text names
+  React.useEffect(() => {
+    if (!orgSession?.org_id) return;
+    window._supabaseInstance
+      .from('profiles')
+      .select('id, full_name')
+      .eq('org_id', orgSession.org_id)
+      .eq('is_active', true)
+      .then(({ data }) => { if (data) setOrgMembers(data); });
+  }, [orgSession?.org_id]);
 
-  function triggerShake(msg) {
-    setError(msg); setShake(true);
-    setTimeout(() => setShake(false), 450);
-  }
+  // Quadrant snapshot for movement tracking (same key as StudentDashboard)
+  const [previousQuadrants, setPreviousQuadrants] = React.useState(() => {
+    try { const s = orgSession; return JSON.parse(localStorage.getItem(`visalens_quadrants_${s?.org_id}`) || '{}'); }
+    catch { return {}; }
+  });
 
-  async function handleLogin() {
-    if (!email.trim() || !password) return;
-    setLoading(true); setError("");
+  const handleQuadrantsComputed = React.useCallback((map) => {
     try {
-      const resp = await fetch(PROXY_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "login", email: email.trim().toLowerCase(), password }),
+      const s = orgSession;
+      if (!s?.org_id) return;
+      localStorage.setItem(`visalens_quadrants_${s.org_id}`, JSON.stringify(map));
+      setPreviousQuadrants(prev => {
+        const hasChange = Object.keys(map).some(id => prev[id] !== map[id]);
+        return hasChange ? { ...prev, ...map } : prev;
       });
-      const data = await resp.json();
-      if (!resp.ok || data.error) { triggerShake(data.error || "Invalid email or password."); setLoading(false); return; }
-      setOrgSession(data);
-      onUnlock(data);
-    } catch { triggerShake("Connection error. Please try again."); setLoading(false); }
-  }
+    } catch {}
+  }, [orgSession]);
 
-  async function handleCode() {
-    const trimmed = code.trim().toUpperCase();
-    if (!trimmed) return;
-    setLoading(true); setError("");
+  async function load() {
+    setLoading(true);
     try {
-      const resp = await fetch(PROXY_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "validate-code", access_code: trimmed }),
-      });
-      const data = await resp.json();
-      if (!resp.ok || data.error) { triggerShake(data.error || "Invalid access code."); setLoading(false); return; }
-      setOrgSession(data);
-      onUnlock(data);
-    } catch { triggerShake("Connection error. Please try again."); setLoading(false); }
+      const s = orgSession;
+      if (!s?.org_id) { setLoading(false); return; }
+      let q = window._supabaseInstance.from('cases')
+        .select('id,case_serial,created_at,updated_at,status_updated_at,student_name,counsellor_name,overall_score,target_country,lead_status,expiry_date,expiry_doc_type,application_targets,results,profile_data,doc_list,payment_status')
+        .order('created_at', { ascending: false })
+        .range(0, 199); // up to 200 for the radar — sufficient for org-level analytics
+      if (s.role === 'counsellor' || s.role === 'viewer') {
+        const name = s.name || s.full_name || s.email || '';
+        if (name) q = q.eq('org_id', s.org_id).or(`created_by.eq.${s.member_id},counsellor_name.eq."${name}"`);
+        else q = q.eq('org_id', s.org_id).eq('created_by', s.member_id);
+      } else {
+        q = q.eq('org_id', s.org_id);
+      }
+      const { data } = await q;
+      setCases((data || []).map(r => ({
+        id: r.id, caseSerial: r.case_serial || null,
+        savedAt: r.created_at, updatedAt: r.updated_at,
+        statusUpdatedAt: r.status_updated_at || r.updated_at || r.created_at,
+        studentName: r.student_name || 'Unnamed', counsellorName: r.counsellor_name || '',
+        overallScore: r.overall_score || 0, targetCountry: r.target_country || '',
+        leadStatus: r.lead_status || 'None', expiryDate: r.expiry_date || null,
+        expiryDocType: r.expiry_doc_type || null,
+        applicationTargets: Array.isArray(r.application_targets) ? r.application_targets : [],
+        results: r.results || {}, profileData: r.profile_data || {},
+        docList: Array.isArray(r.doc_list) ? r.doc_list : [],
+        paymentStatus: r.payment_status || 'Unpaid',
+      })));
+      setLastLoaded(new Date());
+    } catch (e) { console.error('[RadarIntelPage] load error:', e); }
+    finally { setLoading(false); }
   }
 
-  function handleKey(e) { if (e.key === "Enter") tab === "login" ? handleLogin() : handleCode(); }
+  React.useEffect(() => { load(); }, [totalCases, lastSaved]);
+
+  // Use real member profiles as authoritative counsellor list.
+  // Falls back to names on cases only if profiles haven't loaded yet.
+  const counsellorOptions = React.useMemo(() => {
+    const memberNames = orgMembers.map(m => m.full_name).filter(Boolean);
+    if (memberNames.length > 0) return ['All', ...memberNames];
+    return ['All', ...new Set(cases.map(c => c.counsellorName).filter(Boolean))];
+  }, [orgMembers, cases]);
+
+  const filtered = React.useMemo(() =>
+    counsellorFilter === 'All' ? cases : cases.filter(c => c.counsellorName === counsellorFilter),
+    [cases, counsellorFilter]);
+
+  // Counsellor performance data (mirrors logic in StudentDashboard counsellorPerf memo)
+  const counsellorPerf = React.useMemo(() => {
+    const names = counsellorOptions.filter(n => n !== 'All');
+    if (names.length < 1) return [];
+    return names.map(name => {
+      const myCases = cases.filter(c => c.counsellorName === name);
+      const total = myCases.length;
+      if (total === 0) return { name, total: 0, vip: 0, sales: 0, drainers: 0, dead: 0, movedUp: 0, movedDown: 0, avgScore: 0, score: 0 };
+      const withQ = myCases.map(c => {
+        const rawV = _viabilityScoreForRadar(c.profileData)?.score ?? c.overallScore ?? 0;
+        const doc  = _computeDocScoreForRadar(c.profileData, c.results);
+        const rPct = Math.round(((doc?.score ?? 0) / (doc?.totalPossible || 100)) * 100);
+        let q = 'dead';
+        if (rawV >= 50 && rPct >= 50) q = 'vip';
+        else if (rawV >= 50 && rPct < 50) q = 'sales';
+        else if (rawV < 50 && rPct >= 50) q = 'drainers';
+        const prev = previousQuadrants[c.id];
+        const moved = !!prev && prev !== q;
+        const dir = moved ? (['vip', 'sales'].includes(q) ? 'up' : 'down') : null;
+        return { q, moved, dir };
+      });
+      const vip = withQ.filter(c => c.q === 'vip').length;
+      const sales = withQ.filter(c => c.q === 'sales').length;
+      const drainers = withQ.filter(c => c.q === 'drainers').length;
+      const dead = withQ.filter(c => c.q === 'dead').length;
+      const movedUp = withQ.filter(c => c.dir === 'up').length;
+      const movedDown = withQ.filter(c => c.dir === 'down').length;
+      const avgScore = Math.round(myCases.reduce((s, c) => s + (c.overallScore || 0), 0) / total);
+      const perfScore = Math.max(0, Math.min(100, Math.round(
+        ((vip * 3 + sales * 2) / (total * 3)) * 60 +
+        ((movedUp - movedDown) / Math.max(total, 1)) * 20 +
+        (avgScore / 100) * 20
+      )));
+      return { name, total, vip, sales, drainers, dead, movedUp, movedDown, avgScore, score: perfScore };
+    }).sort((a, b) => b.score - a.score);
+  }, [cases, counsellorOptions, previousQuadrants]);
+
+  const QUAD_COLOR = { vip: '#02a06d', sales: '#0d5fe0', drainers: '#e07b00', dead: '#6b7280' };
 
   return (
-    <div className="gate-wrap">
-      <div className={`gate-card${shake ? " shake" : ""}`}>
-        <div className="gate-logo">
-          <div className="gate-logo-mark"><ShieldCheck size={22} color="#fff"/></div>
-          <span className="gate-logo-name">VisaLens</span>
-          <span className="gate-logo-tag">PRO</span>
-        </div>
-        <div className="gate-title">AI-Powered Student Visa Analysis</div>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+      {/* Page header */}
+      <div className="pg-hdr">
+        <h1 className="pg-title">Lead <em>Generator</em></h1>
+        <p className="pg-sub">Pipeline ROI matrix · counsellor performance · quadrant analytics · branch-level view</p>
+      </div>
 
-        <div style={{display:"flex",gap:0,background:"var(--s2)",borderRadius:8,padding:3,marginBottom:20,border:"1px solid var(--bd)"}}>
-          {[{id:"login",label:"Sign In"},{id:"code",label:"Access Code"}].map(t => (
-            <button key={t.id} onClick={() => { setTab(t.id); setError(""); }}
-              style={{flex:1,padding:"7px 12px",borderRadius:6,border:"none",cursor:"pointer",fontSize:12,fontWeight:600,
-                background: tab===t.id ? "var(--p)" : "transparent",
-                color: tab===t.id ? "#fff" : "var(--t2)", transition:"all .15s"}}>
-              {t.label}
+      {/* Toolbar */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
+        {/* View toggle */}
+        <div style={{ display: 'flex', border: '1px solid var(--bd)', borderRadius: 8, overflow: 'hidden', background: 'var(--s2)' }}>
+          {[['radar', '⬡ Matrix View'], ['perf', '📊 Counsellor Analytics']].map(([mode, label]) => (
+            <button key={mode} onClick={() => setViewMode(mode)}
+              style={{ padding: '7px 14px', border: 'none', cursor: 'pointer', background: viewMode === mode ? 'var(--s1)' : 'transparent', color: viewMode === mode ? 'var(--p)' : 'var(--t3)', fontSize: 12, fontWeight: 700, fontFamily: 'var(--fu)', borderRight: mode === 'radar' ? '1px solid var(--bd)' : 'none', transition: 'all .15s' }}>
+              {label}
             </button>
           ))}
         </div>
 
-        {tab === "login" ? (
-          <>
-            <div className="gate-field">
-              <label className="gate-lbl">Email</label>
-              <input ref={inputRef} className="gate-input" type="email" placeholder="you@agency.com"
-                value={email} onChange={e => { setEmail(e.target.value); setError(""); }}
-                onKeyDown={handleKey} autoComplete="email" />
-            </div>
-            <div className="gate-field" style={{position:"relative"}}>
-              <label className="gate-lbl">Password</label>
-              <input className="gate-input" type={showPw ? "text" : "password"} placeholder="••••••••"
-                value={password} onChange={e => { setPassword(e.target.value); setError(""); }}
-                onKeyDown={handleKey} autoComplete="current-password" style={{paddingRight:36}} />
-              <button onClick={() => setShowPw(p => !p)}
-                style={{position:"absolute",right:10,bottom:10,background:"none",border:"none",cursor:"pointer",color:"var(--t3)",padding:0}}>
-                {showPw ? <EyeOff size={14}/> : <Eye size={14}/>}
-              </button>
-            </div>
-            <button className="gate-btn" onClick={handleLogin} disabled={!email.trim() || !password || loading}>
-              {loading ? <><Loader2 size={16} style={{animation:"spin .7s linear infinite"}}/>Signing in…</>
-                       : <><ShieldCheck size={16}/>Sign In</>}
-            </button>
-            <div className="gate-footer">Don't have an account?<br/>Ask your agency admin to invite you.</div>
-          </>
-        ) : (
-          <>
-            <div className="gate-field">
-              <label className="gate-lbl">Access Code</label>
-              <input ref={inputRef} className="gate-input" type="text" placeholder="e.g. ACME-VISA-2026"
-                value={code} onChange={e => { setCode(e.target.value); setError(""); }}
-                onKeyDown={handleKey} autoComplete="off" spellCheck={false} />
-            </div>
-            <button className="gate-btn" onClick={handleCode} disabled={!code.trim() || loading}>
-              {loading ? <><Loader2 size={16} style={{animation:"spin .7s linear infinite"}}/>Verifying…</>
-                       : <><ShieldCheck size={16}/>Access VisaLens</>}
-            </button>
-            <div className="gate-footer">Legacy access for existing agencies.<br/>New accounts use email sign-in above.</div>
-          </>
+        {/* Counsellor filter */}
+        {counsellorOptions.length > 2 && (
+          <select value={counsellorFilter} onChange={e => setCounsellorFilter(e.target.value)}
+            style={{ padding: '7px 10px', borderRadius: 7, border: '1px solid var(--bd)', background: 'var(--s2)', color: 'var(--t1)', fontSize: 12, fontFamily: 'var(--fu)', cursor: 'pointer' }}>
+            {counsellorOptions.map(n => <option key={n} value={n}>{n === 'All' ? 'All counsellors' : n}</option>)}
+          </select>
         )}
 
-        {error && (
-          <div className="gate-err"><AlertCircle size={13} style={{flexShrink:0}}/>{error}</div>
+        {/* Refresh */}
+        <button onClick={load} disabled={loading}
+          style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 12px', borderRadius: 7, border: '1px solid var(--bd)', background: 'var(--s1)', color: 'var(--t2)', fontSize: 12, fontFamily: 'var(--fu)', cursor: 'pointer', marginLeft: 'auto' }}>
+          <RefreshCw size={13} style={{ animation: loading ? 'spin .7s linear infinite' : 'none' }} />
+          {lastLoaded && !loading && <span style={{ fontSize: 10, color: 'var(--t3)' }}>{Math.floor((Date.now() - lastLoaded) / 60000)}m ago</span>}
+          {loading ? 'Loading…' : 'Refresh'}
+        </button>
+      </div>
+
+      {/* ── RADAR MATRIX VIEW ── */}
+      {viewMode === 'radar' && (
+        <RadarMatrix
+          cases={filtered}
+          onOpenCase={onOpenCase}
+          callGeminiInsight={callGeminiInsight}
+          externalInsightCache={geminiCache.current}
+          previousQuadrants={previousQuadrants}
+          onQuadrantsComputed={handleQuadrantsComputed}
+          counsellorList={counsellorOptions.filter(n => n !== 'All')}
+          onReassign={async (caseId, counsellorName) => {
+            const ts = new Date().toISOString();
+            // Look up member id to keep assigned_to (uuid) in sync with counsellor_name
+            const member = orgMembers.find(m => m.full_name === counsellorName);
+            const assignedToId = member?.id || null;
+            setCases(prev => prev.map(c => c.id === caseId ? {
+              ...c,
+              counsellorName,
+              counsellor_name: counsellorName,
+              assigned_to:     assignedToId,
+              updatedAt: ts,
+            } : c));
+            const s = orgSession;
+            if (!s?.org_id) return;
+            await window._supabaseInstance.from('cases')
+              .update({
+                counsellor_name: counsellorName,
+                assigned_to:     assignedToId,
+                updated_at:      ts,
+              })
+              .eq('id', caseId).eq('org_id', s.org_id);
+          }}
+          onStatusChange={async (caseId, newStatus) => {
+            const ts = new Date().toISOString();
+            setCases(prev => prev.map(c => c.id === caseId ? { ...c, leadStatus: newStatus, updatedAt: ts } : c));
+            const s = orgSession;
+            if (!s?.org_id) return;
+            await window._supabaseInstance.from('cases')
+              .update({ lead_status: newStatus, updated_at: ts, status_updated_at: ts })
+              .eq('id', caseId).eq('org_id', s.org_id);
+          }}
+          orgSession={orgSession}
+        />
+      )}
+
+      {/* ── COUNSELLOR ANALYTICS VIEW ── */}
+      {viewMode === 'perf' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {/* Summary bar */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10 }}>
+            {[
+              { label: 'Total Cases', val: cases.length, color: 'var(--p)' },
+              { label: 'VIP Lane', val: counsellorPerf.reduce((s, c) => s + c.vip, 0), color: '#02a06d' },
+              { label: 'Sales Priority', val: counsellorPerf.reduce((s, c) => s + c.sales, 0), color: '#0d5fe0' },
+              { label: 'Time Drainers', val: counsellorPerf.reduce((s, c) => s + c.drainers, 0), color: '#e07b00' },
+              { label: 'Dead Zone', val: counsellorPerf.reduce((s, c) => s + c.dead, 0), color: '#6b7280' },
+            ].map(({ label, val, color }) => (
+              <div key={label} style={{ padding: '14px 16px', borderRadius: 10, background: 'var(--s2)', border: '1px solid var(--bd)' }}>
+                <div style={{ fontSize: 22, fontWeight: 800, color, fontFamily: 'var(--fu)', lineHeight: 1 }}>{val}</div>
+                <div style={{ fontSize: 11, color: 'var(--t3)', fontFamily: 'var(--fu)', marginTop: 4 }}>{label}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Counsellor cards */}
+          {counsellorPerf.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--t3)', fontSize: 14, fontFamily: 'var(--fu)' }}>
+              No counsellor data available yet. Cases need to be assigned to counsellors.
+            </div>
+          ) : (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 14 }}>
+              {counsellorPerf.map((cp, idx) => {
+                const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : null;
+                const barColor = cp.score >= 70 ? '#02a06d' : cp.score >= 40 ? '#0d5fe0' : '#e07b00';
+                const initials = cp.name.trim().split(/\s+/).slice(0, 2).map(p => p[0].toUpperCase()).join('');
+                const hue = cp.name.split('').reduce((a, c) => a + c.charCodeAt(0), 0) % 360;
+                return (
+                  <div key={cp.name} style={{ padding: '18px 20px', borderRadius: 12, background: 'var(--s1)', border: '1px solid var(--bd)', boxShadow: 'var(--sh1)' }}>
+                    {/* Header */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
+                      <div style={{ width: 42, height: 42, borderRadius: '50%', flexShrink: 0, background: `hsl(${hue},55%,88%)`, color: `hsl(${hue},55%,30%)`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 15, fontWeight: 800, fontFamily: 'var(--fu)' }}>{initials}</div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          {medal && <span style={{ fontSize: 16 }}>{medal}</span>}
+                          <span style={{ fontSize: 15, fontWeight: 700, color: 'var(--t1)', fontFamily: 'var(--fh)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cp.name}</span>
+                        </div>
+                        <div style={{ fontSize: 11, color: 'var(--t3)', fontFamily: 'var(--fu)', marginTop: 2 }}>{cp.total} case{cp.total !== 1 ? 's' : ''} · avg score {cp.avgScore}</div>
+                      </div>
+                      <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                        <div style={{ fontSize: 24, fontWeight: 900, color: barColor, fontFamily: 'var(--fu)', lineHeight: 1 }}>{cp.score}</div>
+                        <div style={{ fontSize: 9, color: 'var(--t3)', fontFamily: 'var(--fu)', textTransform: 'uppercase', letterSpacing: '.05em' }}>Perf score</div>
+                      </div>
+                    </div>
+
+                    {/* Performance bar */}
+                    <div style={{ height: 6, background: 'var(--s3)', borderRadius: 3, overflow: 'hidden', marginBottom: 14 }}>
+                      <div style={{ height: '100%', width: `${cp.score}%`, background: `linear-gradient(90deg, ${barColor}aa, ${barColor})`, borderRadius: 3, transition: 'width .5s' }} />
+                    </div>
+
+                    {/* Quadrant breakdown */}
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6, marginBottom: 14 }}>
+                      {[['VIP', cp.vip, '#02a06d'], ['Sales', cp.sales, '#0d5fe0'], ['Drain', cp.drainers, '#e07b00'], ['Dead', cp.dead, '#6b7280']].map(([label, count, color]) => (
+                        <div key={label} style={{ textAlign: 'center', padding: '8px 4px', borderRadius: 8, background: color + '12', border: `1px solid ${color}30` }}>
+                          <div style={{ fontSize: 18, fontWeight: 800, color, fontFamily: 'var(--fu)', lineHeight: 1 }}>{count}</div>
+                          <div style={{ fontSize: 9, color: 'var(--t3)', fontFamily: 'var(--fu)', marginTop: 2, textTransform: 'uppercase', letterSpacing: '.04em' }}>{label}</div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Movement */}
+                    {(cp.movedUp > 0 || cp.movedDown > 0) && (
+                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                        {cp.movedUp > 0 && <span style={{ fontSize: 11, fontWeight: 700, padding: '3px 8px', borderRadius: 6, background: 'rgba(2,160,109,.1)', color: '#02a06d', fontFamily: 'var(--fu)' }}>↑ {cp.movedUp} improved</span>}
+                        {cp.movedDown > 0 && <span style={{ fontSize: 11, fontWeight: 700, padding: '3px 8px', borderRadius: 6, background: 'rgba(220,38,38,.1)', color: '#DC2626', fontFamily: 'var(--fu)' }}>↓ {cp.movedDown} declined</span>}
+                        <span style={{ fontSize: 10, color: 'var(--t3)', fontFamily: 'var(--fu)', display: 'flex', alignItems: 'center' }}>vs last session</span>
+                      </div>
+                    )}
+
+                    {/* Filter button */}
+                    <button onClick={() => { setCounsellorFilter(cp.name); setViewMode('radar'); }}
+                      style={{ marginTop: 12, width: '100%', padding: '7px 0', borderRadius: 8, border: '1px solid var(--bd)', background: 'var(--s2)', color: 'var(--t2)', fontSize: 11, fontWeight: 600, fontFamily: 'var(--fu)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, transition: 'all .15s' }}
+                      onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--p)'; e.currentTarget.style.color = 'var(--p)'; }}
+                      onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--bd)'; e.currentTarget.style.color = 'var(--t2)'; }}
+                    >
+                      View in Matrix →
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Methodology note */}
+          <div style={{ padding: '12px 16px', borderRadius: 8, background: 'var(--s2)', border: '1px solid var(--bd)', fontSize: 11, color: 'var(--t3)', fontFamily: 'var(--fu)', lineHeight: 1.65 }}>
+            <strong style={{ color: 'var(--t2)' }}>Performance score methodology:</strong> Pipeline quality 60% (VIP cases ×3 + Sales ×2 weight, normalised over total) · Quadrant movement delta since last session 20% (improvements minus declines) · Average case viability score 20%. Score range 0–100. Counsellors with no cases assigned are excluded.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── FLOATING CHAT TRAY ─────────────────────────────────────────────────
+   App-level chat tray — renders at fixed bottom-right, persists across all
+   page/tab changes. Max 3 panels. Each panel expands upward when clicked.
+   Chat thread is ChatTrayThread (self-contained, identical logic to
+   ChatThreadInline in StudentDashboard but kept here to avoid circular deps).
+─────────────────────────────────────────────────────────────────────────── */
+const SENDER_PALETTE_TRAY = [
+  { bg:'rgba(29,107,232,.12)',  color:'#1D6BE8' },
+  { bg:'rgba(5,150,105,.12)',   color:'#059669' },
+  { bg:'rgba(139,92,246,.12)',  color:'#7C3AED' },
+  { bg:'rgba(252,71,28,.12)',   color:'#FC471C' },
+  { bg:'rgba(245,158,11,.12)',  color:'#D97706' },
+  { bg:'rgba(236,72,153,.12)',  color:'#DB2777' },
+  { bg:'rgba(20,184,166,.12)',  color:'#0D9488' },
+  { bg:'rgba(99,102,241,.12)',  color:'#4F46E5' },
+];
+function senderColorTray(name=''){
+  let h=0; for(let i=0;i<name.length;i++) h=(h*31+name.charCodeAt(i))>>>0;
+  return SENDER_PALETTE_TRAY[h%SENDER_PALETTE_TRAY.length];
+}
+function extractTagsTray(text=''){
+  return [...new Set((text.match(/#\w+/g)||[]).map(t=>t.toLowerCase()))];
+}
+function fmtTrayTime(iso){
+  if(!iso) return '';
+  const d=new Date(iso), now=new Date();
+  const diffDays=Math.floor((now-d)/86400000);
+  if(diffDays===0) return d.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});
+  if(diffDays===1) return 'Yesterday';
+  if(diffDays<7)   return d.toLocaleDateString('en-GB',{weekday:'short'});
+  return d.toLocaleDateString('en-GB',{day:'numeric',month:'short'});
+}
+const TRAY_PAGE = 50;
+
+/* ─── Task Popover — portal-anchored to "Make task" button (tray copy) ── */
+const PRIORITY_OPTIONS = [
+  { value: 'low',    label: 'Low',    color: '#059669' },
+  { value: 'medium', label: 'Medium', color: '#D97706' },
+  { value: 'high',   label: 'High',   color: '#FC471C' },
+  { value: 'urgent', label: 'Urgent', color: '#DC2626' },
+];
+
+function TaskPopover({ msg, caseId, studentName, orgMembers, anchorRect, onClose, onCreated }) {
+  const session      = getOrgSession();
+  const myId         = session?.member_id || null;
+  const myName       = session?.full_name || session?.name || session?.email || 'Me';
+  const orgId        = session?.org_id    || null;
+
+  function guessAssignee() {
+    const mentioned = (msg.mentioned_ids || []);
+    if (mentioned.length) {
+      const m = orgMembers.find(om => om.id === mentioned[0]);
+      if (m) return { id: m.id, name: m.full_name };
+    }
+    if (msg.sender_id && msg.sender_id !== myId) {
+      return { id: msg.sender_id, name: msg.sender_name };
+    }
+    return { id: myId, name: myName };
+  }
+
+  const guess = guessAssignee();
+
+  const [title,        setTitle]        = React.useState(
+    msg.content ? (msg.content.length > 80 ? msg.content.slice(0, 80) + '…' : msg.content) : ''
+  );
+  const [priority,     setPriority]     = React.useState('medium');
+  const [dueDate,      setDueDate]      = React.useState('');
+  const [assigneeId,   setAssigneeId]   = React.useState(guess.id   || '');
+  const [assigneeName, setAssigneeName] = React.useState(guess.name || '');
+  const [saving,       setSaving]       = React.useState(false);
+  const [saved,        setSaved]        = React.useState(false);
+  const [assignOpen,   setAssignOpen]   = React.useState(false);
+  const [priorOpen,    setPriorOpen]    = React.useState(false);
+
+  const panelRef = React.useRef(null);
+  const titleRef = React.useRef(null);
+
+  // Position: prefer opening above the button so it's always on-screen.
+  // The popover is ~380px tall. If there's not enough room above, open below.
+  const POPOVER_H = 380;
+  const POPOVER_W = 300;
+  const spaceAbove = anchorRect ? anchorRect.top : window.innerHeight;
+  const openAbove  = anchorRect ? spaceAbove >= POPOVER_H : false;
+  const top   = anchorRect
+    ? openAbove
+      ? Math.round(anchorRect.top - POPOVER_H - 6)
+      : Math.min(Math.round(anchorRect.bottom + 6), window.innerHeight - POPOVER_H - 8)
+    : 60;
+  const rawRight = anchorRect ? Math.round(window.innerWidth - anchorRect.right) : 16;
+  const right = Math.max(8, Math.min(rawRight, window.innerWidth - POPOVER_W - 8));
+
+  React.useEffect(() => {
+    function onDown(e) {
+      if (panelRef.current && !panelRef.current.contains(e.target)) onClose();
+    }
+    const t = setTimeout(() => document.addEventListener('mousedown', onDown), 10);
+    return () => { clearTimeout(t); document.removeEventListener('mousedown', onDown); };
+  }, [onClose]);
+
+  React.useEffect(() => { setTimeout(() => titleRef.current?.focus(), 30); }, []);
+
+  async function handleCreate() {
+    if (!title.trim() || !orgId || saving) return;
+    setSaving(true);
+    const { data: newTask, error } = await supabase.from('case_tasks').insert({
+      case_id:          caseId,
+      org_id:           orgId,
+      title:            title.trim(),
+      priority,
+      due_date:         dueDate || null,
+      assigned_to_id:   assigneeId   || null,
+      assigned_to_name: assigneeName || null,
+      created_by_id:    myId,
+      created_by_name:  myName,
+      status:           'open',
+    }).select('id').single();
+    setSaving(false);
+    if (!error) {
+      // System message — appears as pill divider in all chat views
+      supabase.from('chat_messages').insert({
+        case_id:     caseId,
+        org_id:      orgId,
+        sender_id:   myId,
+        sender_name: myName,
+        content:     `Task created: "${title.trim()}"${assigneeName ? ` → assigned to ${assigneeName}` : ''}${priority !== 'medium' ? ` · ${priority}` : ''}`,
+        tags:        [],
+        attachments: [],
+        is_deleted:  false,
+        is_system:   true,
+        type:        'task_created',
+        task_id:     newTask?.id || null,
+      }).then(({ error: e }) => { if(e) console.warn('[ChatTrayThread] system msg error:', e); });
+
+      // Assignee notification (skip if self-assigned)
+      if (assigneeId && assigneeId !== myId) {
+        supabase.from('notifications').insert({
+          recipient_id: assigneeId,
+          org_id:       orgId,
+          type:         'task_assigned',
+          actor_name:   myName,
+          sender_name:  myName,
+          case_id:      caseId,
+          case_name:    studentName,
+          message_id:   newTask?.id || null,
+          body:         title.trim(),
+          is_read:      false,
+        }).then(({ error: e }) => { if(e) console.warn('[ChatTrayThread] task notif error:', e); });
+      }
+
+      setSaved(true);
+      onCreated?.();
+      setTimeout(() => onClose(), 900);
+    }
+  }
+
+  const priColor = PRIORITY_OPTIONS.find(p => p.value === priority)?.color || '#D97706';
+
+  return ReactDOM.createPortal(
+    <div
+      ref={panelRef}
+      style={{
+        position: 'fixed', top, right, width: 300, borderRadius: 10,
+        background: 'var(--s1)', border: '1px solid var(--bd)',
+        boxShadow: '0 8px 32px rgba(10,20,50,.35)', zIndex: 99999, overflow: 'hidden',
+      }}
+    >
+      {/* Header */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 6,
+        padding: '9px 12px', borderBottom: '1px solid var(--bd)', background: 'var(--s2)',
+      }}>
+        <ClipboardList size={12} color="var(--p)"/>
+        <span style={{ flex: 1, fontSize: 11, fontWeight: 700, color: 'var(--t1)', fontFamily: 'var(--fh)' }}>
+          Create task — {studentName}
+        </span>
+        <button onClick={onClose} style={{ border: 'none', background: 'none', cursor: 'pointer', color: 'var(--t3)', padding: 2, display: 'flex', alignItems: 'center' }}>
+          <X size={12}/>
+        </button>
+      </div>
+
+      {saved ? (
+        <div style={{ padding: '24px 16px', textAlign: 'center' }}>
+          <div style={{
+            width: 36, height: 36, borderRadius: '50%',
+            background: 'rgba(5,150,105,.12)', border: '1.5px solid rgba(5,150,105,.3)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 8px',
+          }}>
+            <Check size={16} color="#059669"/>
+          </div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--t1)', fontFamily: 'var(--fu)' }}>Task created</div>
+          <div style={{ fontSize: 10, color: 'var(--t3)', fontFamily: 'var(--fu)', marginTop: 3 }}>It will appear in the peek drawer</div>
+        </div>
+      ) : (
+        <div style={{ padding: '12px' }}>
+          {/* Title */}
+          <div style={{ marginBottom: 10 }}>
+            <label style={{ fontSize: 10, fontWeight: 700, color: 'var(--t3)', fontFamily: 'var(--fu)', textTransform: 'uppercase', letterSpacing: '.05em', display: 'block', marginBottom: 4 }}>
+              Task title
+            </label>
+            <textarea
+              ref={titleRef}
+              value={title}
+              onChange={e => setTitle(e.target.value)}
+              rows={2}
+              onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) handleCreate(); if (e.key === 'Escape') onClose(); }}
+              style={{
+                width: '100%', resize: 'none', boxSizing: 'border-box',
+                padding: '7px 9px', borderRadius: 6,
+                border: '1px solid var(--bd)', background: 'var(--s2)',
+                color: 'var(--t1)', fontSize: 12, fontFamily: 'var(--fu)',
+                lineHeight: 1.5, outline: 'none', maxHeight: 80,
+              }}
+              onFocus={e => e.target.style.borderColor = 'var(--p)'}
+              onBlur={e => e.target.style.borderColor = 'var(--bd)'}
+            />
+          </div>
+
+          {/* Assignee + Priority row */}
+          <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+            {/* Assignee */}
+            <div style={{ flex: 1, position: 'relative' }}>
+              <label style={{ fontSize: 10, fontWeight: 700, color: 'var(--t3)', fontFamily: 'var(--fu)', textTransform: 'uppercase', letterSpacing: '.05em', display: 'block', marginBottom: 4 }}>
+                Assign to
+              </label>
+              <button
+                onClick={() => { setAssignOpen(o => !o); setPriorOpen(false); }}
+                style={{
+                  width: '100%', display: 'flex', alignItems: 'center', gap: 5,
+                  padding: '6px 8px', borderRadius: 6, border: '1px solid var(--bd)',
+                  background: 'var(--s2)', color: 'var(--t1)', fontSize: 11,
+                  fontFamily: 'var(--fu)', cursor: 'pointer', textAlign: 'left',
+                }}
+              >
+                <User size={10} color="var(--t3)"/>
+                <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11 }}>
+                  {assigneeName || 'Unassigned'}
+                </span>
+                <ChevronDown size={9} color="var(--t3)"/>
+              </button>
+              {assignOpen && (
+                <div style={{
+                  position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0,
+                  background: 'var(--s1)', border: '1px solid var(--bd)',
+                  borderRadius: 7, boxShadow: '0 4px 16px rgba(10,20,50,.25)',
+                  zIndex: 100001, overflow: 'hidden', maxHeight: 160, overflowY: 'auto',
+                }}>
+                  <button
+                    onClick={() => { setAssigneeId(''); setAssigneeName(''); setAssignOpen(false); }}
+                    style={{ width: '100%', padding: '7px 10px', border: 'none', background: 'transparent', color: 'var(--t3)', fontFamily: 'var(--fu)', fontSize: 11, cursor: 'pointer', textAlign: 'left' }}
+                    onMouseEnter={e => e.currentTarget.style.background = 'var(--s2)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                  >
+                    Unassigned
+                  </button>
+                  {orgMembers.map(m => (
+                    <button
+                      key={m.id}
+                      onClick={() => { setAssigneeId(m.id); setAssigneeName(m.full_name); setAssignOpen(false); }}
+                      style={{
+                        width: '100%', padding: '7px 10px', border: 'none',
+                        background: m.id === assigneeId ? 'var(--s3)' : 'transparent',
+                        color: 'var(--t1)', fontFamily: 'var(--fu)', fontSize: 11,
+                        cursor: 'pointer', textAlign: 'left', display: 'flex', alignItems: 'center', gap: 6,
+                      }}
+                      onMouseEnter={e => e.currentTarget.style.background = 'var(--s2)'}
+                      onMouseLeave={e => e.currentTarget.style.background = m.id === assigneeId ? 'var(--s3)' : 'transparent'}
+                    >
+                      {m.id === assigneeId && <Check size={9} color="var(--p)"/>}
+                      {m.full_name}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Priority */}
+            <div style={{ width: 90, position: 'relative' }}>
+              <label style={{ fontSize: 10, fontWeight: 700, color: 'var(--t3)', fontFamily: 'var(--fu)', textTransform: 'uppercase', letterSpacing: '.05em', display: 'block', marginBottom: 4 }}>
+                Priority
+              </label>
+              <button
+                onClick={() => { setPriorOpen(o => !o); setAssignOpen(false); }}
+                style={{
+                  width: '100%', display: 'flex', alignItems: 'center', gap: 5,
+                  padding: '6px 8px', borderRadius: 6,
+                  border: `1px solid ${priColor}44`, background: `${priColor}12`,
+                  color: priColor, fontSize: 11, fontFamily: 'var(--fu)',
+                  cursor: 'pointer', fontWeight: 600,
+                }}
+              >
+                <span style={{ flex: 1, textTransform: 'capitalize' }}>{priority}</span>
+                <ChevronDown size={9}/>
+              </button>
+              {priorOpen && (
+                <div style={{
+                  position: 'absolute', top: 'calc(100% + 4px)', right: 0,
+                  width: 110, background: 'var(--s1)', border: '1px solid var(--bd)',
+                  borderRadius: 7, boxShadow: '0 4px 16px rgba(10,20,50,.25)',
+                  zIndex: 100001, overflow: 'hidden',
+                }}>
+                  {PRIORITY_OPTIONS.map(opt => (
+                    <button
+                      key={opt.value}
+                      onClick={() => { setPriority(opt.value); setPriorOpen(false); }}
+                      style={{
+                        width: '100%', padding: '7px 10px', border: 'none',
+                        background: priority === opt.value ? 'var(--s3)' : 'transparent',
+                        color: opt.color, fontFamily: 'var(--fu)', fontSize: 11,
+                        cursor: 'pointer', textAlign: 'left', fontWeight: 600,
+                        display: 'flex', alignItems: 'center', gap: 6,
+                      }}
+                      onMouseEnter={e => e.currentTarget.style.background = 'var(--s2)'}
+                      onMouseLeave={e => e.currentTarget.style.background = priority === opt.value ? 'var(--s3)' : 'transparent'}
+                    >
+                      {priority === opt.value && <Check size={9}/>}
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Due date */}
+          <div style={{ marginBottom: 12 }}>
+            <label style={{ fontSize: 10, fontWeight: 700, color: 'var(--t3)', fontFamily: 'var(--fu)', textTransform: 'uppercase', letterSpacing: '.05em', display: 'block', marginBottom: 4 }}>
+              Due date <span style={{ fontWeight: 400, opacity: .6 }}>(optional)</span>
+            </label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px', borderRadius: 6, border: '1px solid var(--bd)', background: 'var(--s2)' }}>
+              <Calendar size={10} color="var(--t3)"/>
+              <input
+                type="date"
+                value={dueDate}
+                onChange={e => setDueDate(e.target.value)}
+                min={new Date().toISOString().slice(0, 10)}
+                style={{
+                  flex: 1, border: 'none', background: 'transparent',
+                  color: dueDate ? 'var(--t1)' : 'var(--t3)',
+                  fontSize: 11, fontFamily: 'var(--fu)', outline: 'none', cursor: 'pointer',
+                }}
+              />
+            </div>
+          </div>
+
+          {/* Source message chip */}
+          <div style={{
+            padding: '5px 8px', borderRadius: 5,
+            background: 'rgba(29,107,232,.06)', border: '1px solid rgba(29,107,232,.12)',
+            marginBottom: 12,
+          }}>
+            <div style={{ fontSize: 9, fontWeight: 700, color: 'var(--p)', fontFamily: 'var(--fu)', marginBottom: 2, textTransform: 'uppercase', letterSpacing: '.05em' }}>
+              From chat
+            </div>
+            <div style={{ fontSize: 10, color: 'var(--t2)', fontFamily: 'var(--fu)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {msg.content?.slice(0, 70)}{(msg.content?.length || 0) > 70 ? '…' : ''}
+            </div>
+          </div>
+
+          {/* Create button */}
+          <button
+            onClick={handleCreate}
+            disabled={!title.trim() || saving}
+            style={{
+              width: '100%', padding: '8px', borderRadius: 7, border: 'none',
+              background: title.trim() ? 'var(--p)' : 'var(--s3)',
+              color: title.trim() ? '#fff' : 'var(--t3)',
+              fontSize: 12, fontWeight: 700, fontFamily: 'var(--fu)',
+              cursor: title.trim() ? 'pointer' : 'default',
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+              transition: 'background .12s',
+            }}
+          >
+            {saving ? <Loader2 size={12} style={{ animation: 'spin .7s linear infinite' }}/> : <ClipboardList size={12}/>}
+            {saving ? 'Creating…' : 'Create task'}
+          </button>
+          <div style={{ marginTop: 5, textAlign: 'center', fontSize: 9, color: 'var(--t3)', fontFamily: 'var(--fu)' }}>
+            ⌘↵ to create
+          </div>
+        </div>
+      )}
+    </div>,
+    document.body
+  );
+}
+
+function TrayMsgRow({ msg, isMe, pal, grouped, onReply, onMakeTask }) {
+  const [hover, setHover] = React.useState(false);
+  return (
+    <div
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{display:'flex',gap:5,alignItems:'flex-start',marginTop:grouped?2:8,flexDirection:isMe?'row-reverse':'row'}}
+    >
+      <div style={{width:22,flexShrink:0}}>
+        {!grouped&&(
+          <div style={{width:22,height:22,borderRadius:'50%',background:pal.bg,color:pal.color,fontWeight:700,fontSize:8,display:'flex',alignItems:'center',justifyContent:'center',border:`1.5px solid ${pal.color}33`,fontFamily:'var(--fh)'}}>
+            {(msg.sender_name||'?').split(' ').slice(0,2).map(w=>w[0]?.toUpperCase()||'').join('')}
+          </div>
         )}
       </div>
+      <div style={{maxWidth:'78%',display:'flex',flexDirection:'column',alignItems:isMe?'flex-end':'flex-start'}}>
+        {!grouped&&(
+          <div style={{display:'flex',alignItems:'baseline',gap:4,marginBottom:2,flexDirection:isMe?'row-reverse':'row'}}>
+            <span style={{fontSize:9,fontWeight:700,color:pal.color,fontFamily:'var(--fh)'}}>{isMe?'You':msg.sender_name}</span>
+            <span style={{fontSize:8,color:'var(--t3)',fontFamily:'var(--fu)'}}>{fmtTrayTime(msg.created_at)}</span>
+          </div>
+        )}
+        <div style={{padding:'5px 9px',borderRadius:grouped?(isMe?'7px 3px 3px 7px':'3px 7px 7px 3px'):(isMe?'7px 3px 7px 7px':'3px 7px 7px 7px'),background:isMe?'var(--p)':'var(--s2)',border:isMe?'none':'1px solid var(--bd)',color:isMe?'#fff':'var(--t1)',fontSize:11,fontFamily:'var(--fu)',lineHeight:1.5,wordBreak:'break-word',whiteSpace:'pre-wrap'}}>
+          {(msg.content||'').split(/(#\w+|@\w+)/g).map((p,i)=>{
+            if(/^#\w+/.test(p)) return <span key={i} style={{fontWeight:700,opacity:.85}}>{p}</span>;
+            if(/^@/.test(p))    return <span key={i} style={{fontWeight:700,color:isMe?'rgba(255,255,255,.9)':'#1D6BE8',background:isMe?'rgba(255,255,255,.15)':'rgba(29,107,232,.1)',borderRadius:3,padding:'0 2px'}}>{p}</span>;
+            return p;
+          })}
+        </div>
+      </div>
+      {/* Hover action buttons */}
+      <div style={{display:'flex',gap:2,alignItems:'center',opacity:hover?1:0,transition:'opacity .15s',flexDirection:isMe?'row':'row-reverse',alignSelf:'center'}}>
+        <button
+          onClick={onReply}
+          title="Reply"
+          style={{width:24,height:24,borderRadius:5,border:'none',background:'var(--s3)',color:'var(--t3)',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}
+          onMouseEnter={e=>{e.currentTarget.style.background='var(--s2)';}}
+          onMouseLeave={e=>{e.currentTarget.style.background='var(--s3)';}}
+        >
+          <Reply size={11}/>
+        </button>
+        <button
+          onClick={e=>{const rect=e.currentTarget.getBoundingClientRect();onMakeTask(rect);}}
+          title="Create task from this message"
+          style={{width:24,height:24,borderRadius:5,border:'none',background:'var(--s3)',color:'var(--t3)',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}
+          onMouseEnter={e=>{e.currentTarget.style.background='rgba(29,107,232,.15)';e.currentTarget.style.color='var(--p)';}}
+          onMouseLeave={e=>{e.currentTarget.style.background='var(--s3)';e.currentTarget.style.color='var(--t3)';}}
+        >
+          <ClipboardList size={11}/>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ChatTrayThread({ caseId, studentName }) {
+  const sessionRef = React.useRef(getOrgSession());
+  const session    = sessionRef.current;
+  const myId       = session?.member_id || null;
+  const myName     = session?.full_name || session?.name || session?.email || 'You';
+
+  const [messages,    setMessages]    = React.useState([]);
+  const [loading,     setLoading]     = React.useState(true);
+  const [sending,     setSending]     = React.useState(false);
+  const [hasMore,     setHasMore]     = React.useState(false);
+  const [loadingMore, setLoadingMore] = React.useState(false);
+  const [offset,      setOffset]      = React.useState(0);
+  const [draft,       setDraft]       = React.useState('');
+  const [replyTo,     setReplyTo]     = React.useState(null);
+
+  // @mention state
+  const [orgMembers,   setOrgMembers]   = React.useState([]);
+  const [mentionQuery, setMentionQuery] = React.useState('');
+  const [mentionOpen,  setMentionOpen]  = React.useState(false);
+  const [mentionedIds, setMentionedIds] = React.useState([]);
+
+  // task popover state: { msg, anchorRect } | null
+  const [taskTarget,   setTaskTarget]   = React.useState(null);
+
+  const bottomRef = React.useRef(null);
+  const inputRef  = React.useRef(null);
+
+  // Fetch members once
+  React.useEffect(()=>{
+    if(!session?.org_id) return;
+    supabase.from('profiles').select('id,full_name')
+      .eq('org_id',session.org_id).eq('is_active',true).neq('id',myId)
+      .then(({data})=>{ if(data) setOrgMembers(data); });
+  },[session?.org_id,myId]);
+
+  const loadMessages = React.useCallback(async (fromOffset=0,append=false)=>{
+    if(!caseId||!session?.org_id) return;
+    if(fromOffset===0) setLoading(true); else setLoadingMore(true);
+    const {data,error}=await supabase.from('chat_messages').select('*')
+      .eq('case_id',caseId).eq('org_id',session.org_id)
+      .order('created_at',{ascending:false}).range(fromOffset,fromOffset+TRAY_PAGE-1);
+    if(!error&&data){
+      const sorted=[...data].reverse();
+      setMessages(prev=>append?[...sorted,...prev]:sorted);
+      setHasMore(data.length===TRAY_PAGE);
+      setOffset(fromOffset+data.length);
+    }
+    setLoading(false); setLoadingMore(false);
+  },[caseId,session?.org_id]);
+
+  React.useEffect(()=>{
+    setMessages([]); setOffset(0); setHasMore(false);
+    setDraft(''); setReplyTo(null); setMentionedIds([]); setMentionOpen(false);
+    loadMessages(0,false);
+    markRead();
+  },[caseId,loadMessages]);
+
+  React.useEffect(()=>{
+    bottomRef.current?.scrollIntoView({behavior:'smooth'});
+  },[messages.length]);
+
+  React.useEffect(()=>{
+    if(!caseId||!session?.org_id) return;
+    const ch=supabase.channel(`tray-${caseId}`)
+      .on('postgres_changes',{event:'INSERT',schema:'public',table:'chat_messages',filter:`case_id=eq.${caseId}`},p=>{
+        const msg=p.new; if(!msg?.id) return;
+        setMessages(prev=>prev.some(m=>m.id===msg.id)?prev:[...prev,msg]);
+      })
+      .on('postgres_changes',{event:'UPDATE',schema:'public',table:'chat_messages',filter:`case_id=eq.${caseId}`},p=>{
+        const u=p.new; if(!u?.id) return;
+        setMessages(prev=>prev.map(m=>m.id===u.id?{...m,...u}:m));
+      })
+      .subscribe();
+    return ()=>supabase.removeChannel(ch);
+  },[caseId,session?.org_id]);
+
+  async function markRead(){
+    if(!caseId||!myId||!session?.org_id) return;
+    try{ await supabase.from('chat_reads').upsert({
+      case_id:caseId,org_id:session.org_id,member_id:myId,
+      member_name:myName,last_read_at:new Date().toISOString(),
+    },{onConflict:'case_id,member_id'}); }catch{}
+  }
+
+  async function grantMentionAccess(ids){
+    if(!ids.length||!caseId||!session?.org_id) return;
+    const now=new Date().toISOString();
+    const rows=ids.map(memberId=>{
+      const m=orgMembers.find(om=>om.id===memberId);
+      return {case_id:caseId,org_id:session.org_id,member_id:memberId,
+              member_name:m?.full_name||'',last_read_at:now,granted_access:true};
+    });
+    try{ await supabase.from('chat_reads').upsert(rows,{onConflict:'case_id,member_id'}); }catch{}
+  }
+
+  function resolveMentionIds(text){
+    const matches=[...text.matchAll(/@([\w\s]+?)(?=\s@|\s#|$)/g)].map(m=>m[1].trim().toLowerCase());
+    return orgMembers.filter(m=>matches.some(q=>m.full_name?.toLowerCase().startsWith(q))).map(m=>m.id);
+  }
+
+  async function handleSend(){
+    const text=draft.trim();
+    if(!text||!caseId||!session?.org_id||sending) return;
+    setSending(true); setDraft(''); setReplyTo(null); setMentionOpen(false);
+    const tags=extractTagsTray(text);
+    const finalIds=[...new Set([...mentionedIds,...resolveMentionIds(text)])];
+    const capturedReplyTo=replyTo; // capture before state clears
+    const {data:insertedMsg}=await supabase.from('chat_messages').insert({
+      case_id:caseId,org_id:session.org_id,sender_id:myId,sender_name:myName,
+      sender_color:senderColorTray(myName).color,content:text,tags,
+      reply_to_id:capturedReplyTo?.id||null,attachments:[],is_deleted:false,
+      mentioned_ids:finalIds.length?finalIds:null,
+    }).select('id').single();
+
+    // ── Notify @mentioned members ────────────────────────────────────────
+    if(finalIds.length){
+      await grantMentionAccess(finalIds);
+      const preview=text.length>80?text.slice(0,80)+'…':text;
+      fetch(`${PROXY_URL}/api/notify`,{
+        method:'POST', headers:getAuthHeaders(),
+        body:JSON.stringify({
+          recipient_ids: finalIds,
+          sender_id:     myId,
+          sender_name:   myName,
+          type:          'mention',
+          case_id:       caseId,
+          case_name:     studentName,
+          message_id:    insertedMsg?.id||null,
+          body:          preview,
+        }),
+      }).catch(()=>{}); // fire-and-forget, never block UI
+    }
+
+    // ── Notify original sender on reply ─────────────────────────────────
+    if(capturedReplyTo?.sender_id && capturedReplyTo.sender_id!==myId){
+      const alreadyMentioned=finalIds.includes(capturedReplyTo.sender_id);
+      if(!alreadyMentioned){
+        const preview=text.length>80?text.slice(0,80)+'…':text;
+        fetch(`${PROXY_URL}/api/notify`,{
+          method:'POST', headers:getAuthHeaders(),
+          body:JSON.stringify({
+            recipient_ids: [capturedReplyTo.sender_id],
+            sender_id:     myId,
+            sender_name:   myName,
+            type:          'reply',
+            case_id:       caseId,
+            case_name:     studentName,
+            message_id:    insertedMsg?.id||null,
+            body:          preview,
+          }),
+        }).catch(()=>{});
+      }
+    }
+
+    setMentionedIds([]);
+    setSending(false); markRead(); inputRef.current?.focus();
+  }
+
+  const mentionSuggestions=React.useMemo(()=>{
+    if(!mentionQuery) return orgMembers.slice(0,8);
+    const q=mentionQuery.toLowerCase();
+    return orgMembers.filter(m=>m.full_name?.toLowerCase().startsWith(q)).slice(0,8);
+  },[orgMembers,mentionQuery]);
+
+  function handleDraftChange(e){
+    const val=e.target.value; setDraft(val);
+    const cursor=e.target.selectionStart;
+    const textUpToCursor=val.slice(0,cursor);
+    const atIdx=textUpToCursor.lastIndexOf('@');
+    if(atIdx!==-1){
+      const fragment=textUpToCursor.slice(atIdx+1);
+      if(!/\s/.test(fragment)){ setMentionQuery(fragment); setMentionOpen(true); return; }
+    }
+    setMentionOpen(false); setMentionQuery('');
+  }
+
+  function selectMention(member){
+    const cursor=inputRef.current?.selectionStart??draft.length;
+    const textUpToCursor=draft.slice(0,cursor);
+    const atIdx=textUpToCursor.lastIndexOf('@');
+    const before=draft.slice(0,atIdx);
+    const after=draft.slice(cursor);
+    const inserted=`@${member.full_name} `;
+    setDraft(before+inserted+after);
+    setMentionedIds(prev=>[...new Set([...prev,member.id])]);
+    setMentionOpen(false); setMentionQuery('');
+    setTimeout(()=>{
+      const newPos=before.length+inserted.length;
+      inputRef.current?.focus();
+      inputRef.current?.setSelectionRange(newPos,newPos);
+    },0);
+  }
+
+  return (
+    <div style={{display:'flex',flexDirection:'column',height:'100%'}}>
+      {/* Messages */}
+      <div style={{flex:1,overflowY:'auto',padding:'8px 10px',display:'flex',flexDirection:'column',gap:2}}>
+        {hasMore&&(
+          <button onClick={()=>loadMessages(offset,true)} disabled={loadingMore}
+            style={{alignSelf:'center',padding:'3px 10px',borderRadius:5,background:'var(--s2)',border:'1px solid var(--bd)',color:'var(--t3)',fontSize:10,fontFamily:'var(--fu)',cursor:'pointer',marginBottom:4}}>
+            {loadingMore?'Loading…':'Load earlier'}
+          </button>
+        )}
+        {loading?(
+          <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center'}}>
+            <Loader2 size={16} color="var(--t3)" style={{animation:'spin .7s linear infinite'}}/>
+          </div>
+        ):messages.filter(m=>!m.is_deleted).length===0?(
+          <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:6,padding:'24px 0'}}>
+            <MessageSquare size={22} color="var(--s3)"/>
+            <span style={{fontSize:11,color:'var(--t3)',fontFamily:'var(--fu)'}}>Start the conversation</span>
+          </div>
+        ):(
+          messages.map((msg,idx)=>{
+            if(msg.is_deleted) return <div key={msg.id} style={{fontSize:10,color:'var(--t3)',fontStyle:'italic',padding:'1px 32px',fontFamily:'var(--fu)'}}>Message deleted</div>;
+            if(msg.is_system) {
+              return (
+                <div key={msg.id} style={{
+                  display:'flex', alignItems:'center', gap:6,
+                  margin:'8px 0', padding:'0 4px',
+                }}>
+                  <div style={{ flex:1, height:1, background:'var(--bd)' }}/>
+                  <div style={{
+                    display:'flex', alignItems:'center', gap:5,
+                    padding:'3px 9px', borderRadius:20,
+                    background:'var(--s2)', border:'1px solid var(--bd)',
+                    fontSize:10, color:'var(--t3)', fontFamily:'var(--fu)',
+                    whiteSpace:'nowrap',
+                  }}>
+                    <ClipboardList size={9} color="var(--p)"/>
+                    <span>{msg.content}</span>
+                  </div>
+                  <div style={{ flex:1, height:1, background:'var(--bd)' }}/>
+                </div>
+              );
+            }
+            const isMe=msg.sender_id===myId;
+            const pal=senderColorTray(msg.sender_name||'');
+            const prev=messages[idx-1];
+            const grouped=prev&&prev.sender_id===msg.sender_id&&(new Date(msg.created_at)-new Date(prev.created_at))<120000;
+            return(
+              <TrayMsgRow key={msg.id} msg={msg} isMe={isMe} pal={pal} grouped={grouped}
+                onReply={()=>setReplyTo({id:msg.id,sender_name:msg.sender_name,content:msg.content})}
+                onMakeTask={rect=>setTaskTarget({msg,anchorRect:rect})}
+              />
+            );
+          })
+        )}
+        <div ref={bottomRef}/>
+      </div>
+
+      {/* Reply strip */}
+      {replyTo&&(
+        <div style={{display:'flex',alignItems:'center',gap:6,padding:'5px 10px',background:'rgba(29,107,232,.06)',borderTop:'1px solid rgba(29,107,232,.15)',flexShrink:0}}>
+          <Reply size={10} color="#1D6BE8"/>
+          <div style={{flex:1,minWidth:0,fontSize:10,color:'var(--t3)',fontFamily:'var(--fu)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{replyTo.content?.slice(0,50)}</div>
+          <button onClick={()=>setReplyTo(null)} style={{border:'none',background:'none',cursor:'pointer',color:'var(--t3)',padding:2}}><X size={10}/></button>
+        </div>
+      )}
+
+      {/* Compose */}
+      <div style={{padding:'6px 8px',borderTop:replyTo?'none':'1px solid var(--bd)',background:'var(--s2)',flexShrink:0,display:'flex',gap:5,alignItems:'flex-end',position:'relative'}}>
+        {mentionOpen&&mentionSuggestions.length>0&&(
+          <div style={{position:'absolute',bottom:'100%',left:8,right:40,background:'var(--s1)',border:'1px solid var(--bd)',borderRadius:8,boxShadow:'0 -4px 16px rgba(15,30,60,.18)',zIndex:310,marginBottom:4,overflow:'hidden'}}>
+            <div style={{padding:'4px 10px',fontSize:9,fontWeight:700,color:'var(--t3)',fontFamily:'var(--fu)',textTransform:'uppercase',letterSpacing:'.06em',borderBottom:'1px solid var(--bd)'}}>
+              Mention — grants chat access
+            </div>
+            {mentionSuggestions.map(m=>(
+              <button key={m.id} onMouseDown={e=>{e.preventDefault();selectMention(m);}}
+                style={{width:'100%',padding:'6px 10px',border:'none',background:'none',color:'var(--t1)',fontFamily:'var(--fu)',fontSize:11,cursor:'pointer',textAlign:'left',display:'flex',alignItems:'center',gap:7}}
+                onMouseEnter={e=>e.currentTarget.style.background='var(--s2)'}
+                onMouseLeave={e=>e.currentTarget.style.background='none'}
+              >
+                <div style={{width:20,height:20,borderRadius:'50%',background:'rgba(29,107,232,.12)',border:'1.5px solid rgba(29,107,232,.25)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:8,fontWeight:800,color:'#1D6BE8',flexShrink:0}}>
+                  {(m.full_name||'?').split(' ').slice(0,2).map(w=>w[0]?.toUpperCase()||'').join('')}
+                </div>
+                {m.full_name}
+              </button>
+            ))}
+          </div>
+        )}
+        <textarea ref={inputRef} value={draft} onChange={handleDraftChange}
+          onKeyDown={e=>{
+            if(e.key==='Escape'){if(mentionOpen){setMentionOpen(false);return;}if(replyTo)setReplyTo(null);}
+            if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();handleSend();}
+          }}
+          placeholder={`Message… (@ to mention)`}
+          rows={1}
+          style={{flex:1,resize:'none',padding:'6px 9px',borderRadius:6,border:'1px solid var(--bd)',background:'var(--s1)',color:'var(--t1)',fontSize:11,fontFamily:'var(--fu)',lineHeight:1.5,outline:'none',maxHeight:72,overflowY:'auto'}}
+          onFocus={e=>e.target.style.borderColor='var(--p)'}
+          onBlur={e=>e.target.style.borderColor='var(--bd)'}
+          onInput={e=>{e.target.style.height='auto';e.target.style.height=Math.min(e.target.scrollHeight,72)+'px';}}
+        />
+        <button onClick={handleSend} disabled={!draft.trim()||sending}
+          style={{width:30,height:30,borderRadius:6,border:'none',background:draft.trim()?'var(--p)':'var(--s3)',color:draft.trim()?'#fff':'var(--t3)',cursor:draft.trim()?'pointer':'default',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+          {sending?<Loader2 size={12} style={{animation:'spin .7s linear infinite'}}/>:<Send size={12}/>}
+        </button>
+      </div>
+      {/* Task popover — portal-rendered above all tray windows */}
+      {taskTarget && (
+        <TaskPopover
+          msg={taskTarget.msg}
+          caseId={caseId}
+          studentName={studentName}
+          orgMembers={orgMembers}
+          anchorRect={taskTarget.anchorRect}
+          onClose={() => setTaskTarget(null)}
+          onCreated={() => setTaskTarget(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function FloatingChatTray({ chats, onClose, onToggleMinimise, peekOpen }) {
+  if(!chats.length) return null;
+  // When peek drawer is open, shift the tray left so it doesn't sit behind it.
+  // Drawer is min(440px,92vw) wide + 16px gap.
+  const drawerOffset = peekOpen ? Math.min(440, window.innerWidth * 0.92) + 16 : 0;
+  return (
+    <div style={{position:'fixed',bottom:0,right:16 + drawerOffset,display:'flex',gap:8,alignItems:'flex-end',zIndex:600,pointerEvents:'none',transition:'right .2s ease'}}>
+      {chats.map((chat, i) => (
+        <div key={chat.caseId} style={{
+          width:320,
+          height: chat.minimised ? 48 : 'min(520px,76vh)',
+          background:'var(--s1)',
+          border:'1px solid var(--bd)',
+          borderBottom:'none',
+          borderRadius:'10px 10px 0 0',
+          boxShadow:'0 -4px 32px rgba(15,30,60,.22)',
+          display:'flex',flexDirection:'column',
+          transition:'height .2s var(--eout)',
+          overflow:'hidden',
+          pointerEvents:'all',
+          order: chats.length - i, // rightmost = most recently opened
+        }}>
+          {/* Title bar */}
+          <div style={{display:'flex',alignItems:'center',gap:7,padding:'0 10px',height:48,flexShrink:0,background:'var(--s2)',borderBottom:chat.minimised?'none':'1px solid var(--bd)',cursor:'pointer',userSelect:'none'}}
+            onClick={()=>onToggleMinimise(chat.caseId)}>
+            <div style={{width:26,height:26,borderRadius:'50%',flexShrink:0,background:'rgba(29,107,232,.12)',border:'1.5px solid rgba(29,107,232,.25)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:9,fontWeight:800,color:'#1D6BE8',fontFamily:'var(--fh)'}}>
+              {(chat.studentName||'?').split(' ').slice(0,2).map(w=>w[0]?.toUpperCase()||'').join('')}
+            </div>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:11,fontWeight:700,color:'var(--t1)',fontFamily:'var(--fh)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{chat.studentName}</div>
+              <div style={{fontSize:9,color:'var(--t3)',fontFamily:'var(--fu)'}}>{chat.minimised?'Click to expand':'Case chat'}</div>
+            </div>
+            <button onClick={e=>{e.stopPropagation();onClose(chat.caseId);}}
+              style={{width:24,height:24,borderRadius:5,border:'none',background:'var(--s3)',color:'var(--t2)',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+              <X size={11}/>
+            </button>
+          </div>
+          {/* Thread body */}
+          {!chat.minimised&&(
+            <div style={{flex:1,minHeight:0,display:'flex',flexDirection:'column'}}>
+              <ChatTrayThread caseId={chat.caseId} studentName={chat.studentName}/>
+            </div>
+          )}
+        </div>
+      ))}
     </div>
   );
 }
@@ -10109,6 +11208,22 @@ function App() {
 
   if (currentPath === '/admin') return <AdminPanel />;
 
+  // ── Analytics route — role-gated to org_owner and branch_manager only ──
+  if (currentPath === '/analytics') {
+    const session = (() => {
+      try { return JSON.parse(sessionStorage.getItem('visalens_org_session') || 'null'); }
+      catch { return null; }
+    })();
+    if (!['org_owner', 'branch_manager'].includes(session?.role)) {
+      window.location.href = '/';
+      return null;
+    }
+    return <AnalyticsDashboard orgSession={session} onLogout={() => {
+      try { sessionStorage.removeItem('visalens_org_session'); } catch {}
+      window.location.href = '/';
+    }} />;
+  }
+
   const inviteToken = searchParams.get('token');
   if (currentPath === '/invite' && inviteToken) {
     return (
@@ -10119,11 +11234,25 @@ function App() {
     );
   }
 
+  // Check for public interview URLs
+  const publicInterviewMatch = currentPath.match(/^\/interview\/([a-f0-9-]+)$/);
+  if (publicInterviewMatch) {
+    const interviewToken = publicInterviewMatch[1];
+    return <PublicInterview token={interviewToken} />;
+  }
+
   const [orgSession, setOrgSessionState] = useState(() => getOrgSession());
 
   function handleUnlock(sessionData) {
     setOrgSession(sessionData);
     setOrgSessionState(sessionData);
+    // Set Supabase auth session immediately so RLS sees the correct auth.uid()
+    if (sessionData?.access_token && sessionData?.refresh_token) {
+      supabase.auth.setSession({
+        access_token:  sessionData.access_token,
+        refresh_token: sessionData.refresh_token,
+      }).catch(e => console.warn('[Auth] setSession on unlock failed:', e));
+    }
   }
 
   function handleLogout() {

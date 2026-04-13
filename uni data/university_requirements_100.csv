@@ -1,0 +1,101 @@
+Country,University,Ranking,Program,Level,Min_IELTS,Min_GPA,Min_Financial,Duration,Tuition,Notes
+United Kingdom,University of Oxford,QS #1,BSc Computer Science,Undergraduate,6.5,3.3,20000,3 years,25000,High competition
+United Kingdom,University of Oxford,QS #1,BA Economics,Undergraduate,6.5,3.3,20000,3 years,25000,High competition
+United Kingdom,University of Oxford,QS #1,MSc Data Science,Postgraduate,7.5,3.7,25000,1 year,35000,High competition
+United Kingdom,University of Oxford,QS #1,MBA,Postgraduate,7.5,3.7,25000,1 year,35000,High competition
+United Kingdom,University of Oxford,QS #1,International Foundation Program,Foundation,6.5,3.3,20000,1 year,25000,High competition
+United Kingdom,University of Cambridge,QS #2,BSc Computer Science,Undergraduate,6.5,3.3,20000,3 years,25000,High competition
+United Kingdom,University of Cambridge,QS #2,BA Economics,Undergraduate,6.5,3.3,20000,3 years,25000,High competition
+United Kingdom,University of Cambridge,QS #2,MSc Data Science,Postgraduate,7.5,3.7,25000,1 year,35000,High competition
+United Kingdom,University of Cambridge,QS #2,MBA,Postgraduate,7.5,3.7,25000,1 year,35000,High competition
+United Kingdom,University of Cambridge,QS #2,International Foundation Program,Foundation,6.5,3.3,20000,1 year,25000,High competition
+United Kingdom,Imperial College London,QS #3,BSc Computer Science,Undergraduate,6.5,3.3,20000,3 years,25000,High competition
+United Kingdom,Imperial College London,QS #3,BA Economics,Undergraduate,6.5,3.3,20000,3 years,25000,High competition
+United Kingdom,Imperial College London,QS #3,MSc Data Science,Postgraduate,7.5,3.7,25000,1 year,35000,High competition
+United Kingdom,Imperial College London,QS #3,MBA,Postgraduate,7.5,3.7,25000,1 year,35000,High competition
+United Kingdom,Imperial College London,QS #3,International Foundation Program,Foundation,6.5,3.3,20000,1 year,25000,High competition
+United Kingdom,UCL,QS #4,BSc Computer Science,Undergraduate,6.5,3.3,20000,3 years,25000,High competition
+United Kingdom,UCL,QS #4,BA Economics,Undergraduate,6.5,3.3,20000,3 years,25000,High competition
+United Kingdom,UCL,QS #4,MSc Data Science,Postgraduate,7.5,3.7,25000,1 year,35000,High competition
+United Kingdom,UCL,QS #4,MBA,Postgraduate,7.5,3.7,25000,1 year,35000,High competition
+United Kingdom,UCL,QS #4,International Foundation Program,Foundation,6.5,3.3,20000,1 year,25000,High competition
+United Kingdom,University of Edinburgh,QS #5,BSc Computer Science,Undergraduate,6.5,3.3,20000,3 years,25000,High competition
+United Kingdom,University of Edinburgh,QS #5,BA Economics,Undergraduate,6.5,3.3,20000,3 years,25000,High competition
+United Kingdom,University of Edinburgh,QS #5,MSc Data Science,Postgraduate,7.5,3.7,25000,1 year,35000,High competition
+United Kingdom,University of Edinburgh,QS #5,MBA,Postgraduate,7.5,3.7,25000,1 year,35000,High competition
+United Kingdom,University of Edinburgh,QS #5,International Foundation Program,Foundation,6.5,3.3,20000,1 year,25000,High competition
+United Kingdom,King's College London,QS #6,BSc Computer Science,Undergraduate,6.5,3.3,20000,3 years,25000,High competition
+United Kingdom,King's College London,QS #6,BA Economics,Undergraduate,6.5,3.3,20000,3 years,25000,High competition
+United Kingdom,King's College London,QS #6,MSc Data Science,Postgraduate,7.5,3.7,25000,1 year,35000,High competition
+United Kingdom,King's College London,QS #6,MBA,Postgraduate,7.5,3.7,25000,1 year,35000,High competition
+United Kingdom,King's College London,QS #6,International Foundation Program,Foundation,6.5,3.3,20000,1 year,25000,High competition
+United Kingdom,LSE,QS #7,BSc Computer Science,Undergraduate,6.5,3.3,20000,3 years,25000,High competition
+United Kingdom,LSE,QS #7,BA Economics,Undergraduate,6.5,3.3,20000,3 years,25000,High competition
+United Kingdom,LSE,QS #7,MSc Data Science,Postgraduate,7.5,3.7,25000,1 year,35000,High competition
+United Kingdom,LSE,QS #7,MBA,Postgraduate,7.5,3.7,25000,1 year,35000,High competition
+United Kingdom,LSE,QS #7,International Foundation Program,Foundation,6.5,3.3,20000,1 year,25000,High competition
+United Kingdom,University of Manchester,QS #8,BSc Computer Science,Undergraduate,6.5,3.3,20000,3 years,25000,High competition
+United Kingdom,University of Manchester,QS #8,BA Economics,Undergraduate,6.5,3.3,20000,3 years,25000,High competition
+United Kingdom,University of Manchester,QS #8,MSc Data Science,Postgraduate,7.5,3.7,25000,1 year,35000,High competition
+United Kingdom,University of Manchester,QS #8,MBA,Postgraduate,7.5,3.7,25000,1 year,35000,High competition
+United Kingdom,University of Manchester,QS #8,International Foundation Program,Foundation,6.5,3.3,20000,1 year,25000,High competition
+United Kingdom,University of Warwick,QS #9,BSc Computer Science,Undergraduate,6.5,3.3,20000,3 years,25000,High competition
+United Kingdom,University of Warwick,QS #9,BA Economics,Undergraduate,6.5,3.3,20000,3 years,25000,High competition
+United Kingdom,University of Warwick,QS #9,MSc Data Science,Postgraduate,7.5,3.7,25000,1 year,35000,High competition
+United Kingdom,University of Warwick,QS #9,MBA,Postgraduate,7.5,3.7,25000,1 year,35000,High competition
+United Kingdom,University of Warwick,QS #9,International Foundation Program,Foundation,6.5,3.3,20000,1 year,25000,High competition
+United Kingdom,University of Bristol,QS #10,BSc Computer Science,Undergraduate,6.5,3.3,20000,3 years,25000,High competition
+United Kingdom,University of Bristol,QS #10,BA Economics,Undergraduate,6.5,3.3,20000,3 years,25000,High competition
+United Kingdom,University of Bristol,QS #10,MSc Data Science,Postgraduate,7.5,3.7,25000,1 year,35000,High competition
+United Kingdom,University of Bristol,QS #10,MBA,Postgraduate,7.5,3.7,25000,1 year,35000,High competition
+United Kingdom,University of Bristol,QS #10,International Foundation Program,Foundation,6.5,3.3,20000,1 year,25000,High competition
+United States,Harvard University,QS #1,BSc Computer Science,Undergraduate,7.5,3.5,50000,4 years,50000,Requires GRE/SAT
+United States,Harvard University,QS #1,BA Economics,Undergraduate,7.5,3.5,50000,4 years,50000,Requires GRE/SAT
+United States,Harvard University,QS #1,MSc Data Science,Postgraduate,7.5,3.8,50000,2 years,60000,Requires GRE/SAT
+United States,Harvard University,QS #1,MBA,Postgraduate,7.5,3.8,50000,2 years,60000,Requires GRE/SAT
+United States,Harvard University,QS #1,International Foundation Program,Foundation,7.5,3.5,50000,1 year,50000,Requires GRE/SAT
+United States,MIT,QS #2,BSc Computer Science,Undergraduate,7.5,3.5,50000,4 years,50000,Requires GRE/SAT
+United States,MIT,QS #2,BA Economics,Undergraduate,7.5,3.5,50000,4 years,50000,Requires GRE/SAT
+United States,MIT,QS #2,MSc Data Science,Postgraduate,7.5,3.8,50000,2 years,60000,Requires GRE/SAT
+United States,MIT,QS #2,MBA,Postgraduate,7.5,3.8,50000,2 years,60000,Requires GRE/SAT
+United States,MIT,QS #2,International Foundation Program,Foundation,7.5,3.5,50000,1 year,50000,Requires GRE/SAT
+United States,Stanford University,QS #3,BSc Computer Science,Undergraduate,7.5,3.5,50000,4 years,50000,Requires GRE/SAT
+United States,Stanford University,QS #3,BA Economics,Undergraduate,7.5,3.5,50000,4 years,50000,Requires GRE/SAT
+United States,Stanford University,QS #3,MSc Data Science,Postgraduate,7.5,3.8,50000,2 years,60000,Requires GRE/SAT
+United States,Stanford University,QS #3,MBA,Postgraduate,7.5,3.8,50000,2 years,60000,Requires GRE/SAT
+United States,Stanford University,QS #3,International Foundation Program,Foundation,7.5,3.5,50000,1 year,50000,Requires GRE/SAT
+United States,UC Berkeley,QS #4,BSc Computer Science,Undergraduate,7.5,3.5,50000,4 years,50000,Requires GRE/SAT
+United States,UC Berkeley,QS #4,BA Economics,Undergraduate,7.5,3.5,50000,4 years,50000,Requires GRE/SAT
+United States,UC Berkeley,QS #4,MSc Data Science,Postgraduate,7.5,3.8,50000,2 years,60000,Requires GRE/SAT
+United States,UC Berkeley,QS #4,MBA,Postgraduate,7.5,3.8,50000,2 years,60000,Requires GRE/SAT
+United States,UC Berkeley,QS #4,International Foundation Program,Foundation,7.5,3.5,50000,1 year,50000,Requires GRE/SAT
+United States,Columbia University,QS #5,BSc Computer Science,Undergraduate,7.5,3.5,50000,4 years,50000,Requires GRE/SAT
+United States,Columbia University,QS #5,BA Economics,Undergraduate,7.5,3.5,50000,4 years,50000,Requires GRE/SAT
+United States,Columbia University,QS #5,MSc Data Science,Postgraduate,7.5,3.8,50000,2 years,60000,Requires GRE/SAT
+United States,Columbia University,QS #5,MBA,Postgraduate,7.5,3.8,50000,2 years,60000,Requires GRE/SAT
+United States,Columbia University,QS #5,International Foundation Program,Foundation,7.5,3.5,50000,1 year,50000,Requires GRE/SAT
+United States,Yale University,QS #6,BSc Computer Science,Undergraduate,7.5,3.5,50000,4 years,50000,Requires GRE/SAT
+United States,Yale University,QS #6,BA Economics,Undergraduate,7.5,3.5,50000,4 years,50000,Requires GRE/SAT
+United States,Yale University,QS #6,MSc Data Science,Postgraduate,7.5,3.8,50000,2 years,60000,Requires GRE/SAT
+United States,Yale University,QS #6,MBA,Postgraduate,7.5,3.8,50000,2 years,60000,Requires GRE/SAT
+United States,Yale University,QS #6,International Foundation Program,Foundation,7.5,3.5,50000,1 year,50000,Requires GRE/SAT
+United States,Princeton University,QS #7,BSc Computer Science,Undergraduate,7.5,3.5,50000,4 years,50000,Requires GRE/SAT
+United States,Princeton University,QS #7,BA Economics,Undergraduate,7.5,3.5,50000,4 years,50000,Requires GRE/SAT
+United States,Princeton University,QS #7,MSc Data Science,Postgraduate,7.5,3.8,50000,2 years,60000,Requires GRE/SAT
+United States,Princeton University,QS #7,MBA,Postgraduate,7.5,3.8,50000,2 years,60000,Requires GRE/SAT
+United States,Princeton University,QS #7,International Foundation Program,Foundation,7.5,3.5,50000,1 year,50000,Requires GRE/SAT
+United States,Caltech,QS #8,BSc Computer Science,Undergraduate,7.5,3.5,50000,4 years,50000,Requires GRE/SAT
+United States,Caltech,QS #8,BA Economics,Undergraduate,7.5,3.5,50000,4 years,50000,Requires GRE/SAT
+United States,Caltech,QS #8,MSc Data Science,Postgraduate,7.5,3.8,50000,2 years,60000,Requires GRE/SAT
+United States,Caltech,QS #8,MBA,Postgraduate,7.5,3.8,50000,2 years,60000,Requires GRE/SAT
+United States,Caltech,QS #8,International Foundation Program,Foundation,7.5,3.5,50000,1 year,50000,Requires GRE/SAT
+United States,University of Pennsylvania,QS #9,BSc Computer Science,Undergraduate,7.5,3.5,50000,4 years,50000,Requires GRE/SAT
+United States,University of Pennsylvania,QS #9,BA Economics,Undergraduate,7.5,3.5,50000,4 years,50000,Requires GRE/SAT
+United States,University of Pennsylvania,QS #9,MSc Data Science,Postgraduate,7.5,3.8,50000,2 years,60000,Requires GRE/SAT
+United States,University of Pennsylvania,QS #9,MBA,Postgraduate,7.5,3.8,50000,2 years,60000,Requires GRE/SAT
+United States,University of Pennsylvania,QS #9,International Foundation Program,Foundation,7.5,3.5,50000,1 year,50000,Requires GRE/SAT
+United States,University of Chicago,QS #10,BSc Computer Science,Undergraduate,7.5,3.5,50000,4 years,50000,Requires GRE/SAT
+United States,University of Chicago,QS #10,BA Economics,Undergraduate,7.5,3.5,50000,4 years,50000,Requires GRE/SAT
+United States,University of Chicago,QS #10,MSc Data Science,Postgraduate,7.5,3.8,50000,2 years,60000,Requires GRE/SAT
+United States,University of Chicago,QS #10,MBA,Postgraduate,7.5,3.8,50000,2 years,60000,Requires GRE/SAT
+United States,University of Chicago,QS #10,International Foundation Program,Foundation,7.5,3.5,50000,1 year,50000,Requires GRE/SAT
