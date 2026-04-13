@@ -6350,7 +6350,7 @@ useEffect(() => {
 
         // Load inbox unread count for sidebar badge
         try {
-          const inboxRes = await authedFetch(`${PROXY_URL}/api/inbox/alerts?unread=true&limit=200`);
+          const inboxRes = await authedFetch(`${PROXY_URL}/api/inbox/alerts?unread=true&limit=200`, {}, supabase);
           if (inboxRes.ok) {
             const inboxData = await inboxRes.json();
             setInboxUnread((inboxData.alerts || []).filter(a => !a.is_read).length);
