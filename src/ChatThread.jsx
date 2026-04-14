@@ -192,6 +192,7 @@ export default function ChatThread({ caseId, studentName, session: propSession }
 
   /* ─── Fetch org members for @mention and task assignee picker ─────────────────── */
   useEffect(() => {
+    console.log('[ChatThread] orgMembers fetch - session:', session, 'myId:', myId);
     if (!session?.org_id) return;
     supabase
       .from('profiles')
@@ -200,7 +201,10 @@ export default function ChatThread({ caseId, studentName, session: propSession }
       .eq('is_active', true)
       .neq('id', myId)  // exclude self — no point @mentioning yourself
       .order('full_name', { ascending: true })
-      .then(({ data }) => { if (data) setOrgMembers(data); });
+      .then(({ data }) => {
+        console.log('[ChatThread] orgMembers loaded:', data);
+        if (data) setOrgMembers(data);
+      });
   }, [session?.org_id, myId]);
 
   /* ─── Load pinned messages for this thread ──────────────────────── */
