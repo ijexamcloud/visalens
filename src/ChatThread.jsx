@@ -533,6 +533,10 @@ export default function ChatThread({ caseId, studentName, session: propSession }
       setSending(false);
       markAsRead();
       inputRef.current?.focus();
+      // Scroll to bottom if replying to an earlier message
+      if (currentReplyTo) {
+        bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+      }
     }
   }
 
