@@ -211,6 +211,7 @@ export default function ChatThread({ caseId, studentName, session: propSession }
   async function loadPinnedMessages() {
     if (!caseId || !session?.org_id) return;
     try {
+      console.log('[ChatThread] loadPinnedMessages - caseId:', caseId);
       const { data } = await supabase
         .from('chat_messages')
         .select('*')
@@ -219,8 +220,14 @@ export default function ChatThread({ caseId, studentName, session: propSession }
         .eq('is_pinned', true)
         .eq('is_deleted', false)
         .order('pinned_at', { ascending: true });
-      if (data) setPinnedMessages(data);
-    } catch { /* non-critical */ }
+      console.log('[ChatThread] loadPinnedMessages - DB returned:', data?.length || 0, 'pinned messages');
+      if (data) {
+        console.log('[ChatThread] loadPinnedMessages - pinned messages:', data.map(p => ({ id: p.id, content: p.content?.slice(0, 20) })));
+        setPinnedMessages(data);
+      }
+    } catch (e) {
+      console.error('[ChatThread] loadPinnedMessages error:', e);
+    }
   }
 
   /* ─── Scroll to and highlight message ─────────────────────────────── */
@@ -556,10 +563,17 @@ export default function ChatThread({ caseId, studentName, session: propSession }
     if (!session?.org_id || !caseId) return;
     const now = new Date().toISOString();
 
+    console.log('[ChatThread] handlePin - msg.id:', msg.id);
+    console.log('[ChatThread] current pinnedMessages count:', pinnedMessages.length);
+    console.log('[ChatThread] pinnedMessages:', pinnedMessages.map(p => ({ id: p.id, content: p.content?.slice(0, 20) })));
+
     // Check 3-pin limit before proceeding
     const currentPinnedCount = pinnedMessages.filter(m => m.id !== msg.id).length;
+    console.log('[ChatThread] currentPinnedCount (excluding this msg):', currentPinnedCount);
+
     if (currentPinnedCount >= 3) {
       // Show replacement modal
+      console.log('[ChatThread] 3-pin limit reached, showing replacement modal');
       setPinReplaceModal({ newMsg: msg, currentPins: pinnedMessages });
       return;
     }
@@ -575,16 +589,20 @@ export default function ChatThread({ caseId, studentName, session: propSession }
     });
     setPinnedBarOpen(true);
 
+    console.log('[ChatThread] Updating DB for pin');
     const { error } = await supabase
       .from('chat_messages')
       .update({ is_pinned: true, pinned_at: now, pinned_by_name: myName })
       .eq('id', msg.id)
       .eq('org_id', session.org_id);
+
     if (error) {
       console.error('[ChatThread] pin error:', error);
       // Roll back
       setMessages(prev => prev.map(m => m.id === msg.id ? msg : m));
       setPinnedMessages(prev => prev.filter(p => p.id !== msg.id));
+    } else {
+      console.log('[ChatThread] pin DB update successful');
     }
   }
 
