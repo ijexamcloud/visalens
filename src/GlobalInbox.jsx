@@ -372,8 +372,9 @@ export default function GlobalInbox({ session, onOpenCase, onOpenDashboard }) {
           {/* Search */}
           <div style={{
             display: 'flex', alignItems: 'center', gap: 8,
-            background: 'var(--s2)', border: '1px solid var(--bd)',
+            background: 'var(--s1)', border: '1.5px solid var(--bd)',
             borderRadius: 'var(--r1)', padding: '7px 10px',
+            boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
           }}>
             <Search size={13} color="var(--t3)" style={{ flexShrink: 0 }}/>
             <input

@@ -22,7 +22,7 @@ import ReactDOM from 'react-dom';
 import {
   Send, Search, X, Reply, Trash2, Printer, ChevronUp,
   Loader2, Hash, MessageSquare, ClipboardList, Check,
-  Calendar, ChevronDown, User, Pin, PinOff, Sparkles,
+  Calendar, ChevronDown, User, Pin, PinOff, Sparkles, Copy,
 } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
 
@@ -140,6 +140,8 @@ export default function ChatThread({ caseId, studentName, session: propSession }
   const [summaryOpen,  setSummaryOpen]  = useState(true);
   const [pinnedMessages, setPinnedMessages] = useState([]);
   const [pinnedBarOpen,  setPinnedBarOpen]  = useState(true);
+  const [highlightedMessageId, setHighlightedMessageId] = useState(null);
+  const [pinReplaceModal, setPinReplaceModal] = useState(null); // { newMsg, currentPins } | null
   const inputRef   = useRef(null);
   const searchRef  = useRef(null);
   const bottomRef  = useRef(null);
@@ -219,6 +221,16 @@ export default function ChatThread({ caseId, studentName, session: propSession }
         .order('pinned_at', { ascending: true });
       if (data) setPinnedMessages(data);
     } catch { /* non-critical */ }
+  }
+
+  /* ─── Scroll to and highlight message ─────────────────────────────── */
+  function scrollToMessage(msgId) {
+    const msgElement = document.querySelector(`[data-message-id="${msgId}"]`);
+    if (msgElement) {
+      msgElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setHighlightedMessageId(msgId);
+      setTimeout(() => setHighlightedMessageId(null), 1000);
+    }
   }
 
   /* ─── Mark thread read (upsert chat_reads) ──────────────────────── */
@@ -539,6 +551,15 @@ export default function ChatThread({ caseId, studentName, session: propSession }
   async function handlePin(msg) {
     if (!session?.org_id || !caseId) return;
     const now = new Date().toISOString();
+
+    // Check 3-pin limit before proceeding
+    const currentPinnedCount = pinnedMessages.filter(m => m.id !== msg.id).length;
+    if (currentPinnedCount >= 3) {
+      // Show replacement modal
+      setPinReplaceModal({ newMsg: msg, currentPins: pinnedMessages });
+      return;
+    }
+
     // Optimistic update
     const updated = { ...msg, is_pinned: true, pinned_at: now, pinned_by_name: myName };
     setMessages(prev => prev.map(m => m.id === msg.id ? updated : m));
@@ -561,6 +582,25 @@ export default function ChatThread({ caseId, studentName, session: propSession }
       setMessages(prev => prev.map(m => m.id === msg.id ? msg : m));
       setPinnedMessages(prev => prev.filter(p => p.id !== msg.id));
     }
+  }
+
+  /* ─── Handle pin replacement modal selection ───────────────────────── */
+  async function handleReplacePin(selectedPinId) {
+    if (!pinReplaceModal) return;
+    const { newMsg, currentPins } = pinReplaceModal;
+
+    // Unpin selected message
+    await handleUnpin(selectedPinId);
+
+    // Pin new message
+    await handlePin(newMsg);
+
+    // Close modal
+    setPinReplaceModal(null);
+  }
+
+  function closePinReplaceModal() {
+    setPinReplaceModal(null);
   }
 
   async function handleUnpin(msgId) {
@@ -942,12 +982,14 @@ export default function ChatThread({ caseId, studentName, session: propSession }
                 return (
                   <div
                     key={pm.id}
+                    onClick={() => scrollToMessage(pm.id)}
                     style={{
                       display: 'flex', alignItems: 'flex-start', gap: 8,
                       padding: '7px 14px',
                       borderBottom: i < pinnedMessages.length - 1 ? '1px solid rgba(13,148,136,.08)' : 'none',
                       background: 'transparent',
                       transition: 'background .1s',
+                      cursor: 'pointer',
                     }}
                     onMouseEnter={e => e.currentTarget.style.background = 'rgba(13,148,136,.06)'}
                     onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
@@ -1096,6 +1138,8 @@ export default function ChatThread({ caseId, studentName, session: propSession }
                 onPin={() => handlePin(msg)}
                 onUnpin={() => handleUnpin(msg.id)}
                 isPinned={!!msg.is_pinned}
+                isHighlighted={highlightedMessageId === msg.id}
+                onReplyJump={reply?.id ? () => scrollToMessage(reply.id) : null}
               />
             );
           })
@@ -1276,6 +1320,66 @@ export default function ChatThread({ caseId, studentName, session: propSession }
           }
         </button>
       </div>
+
+      {/* ── Pin replacement modal ── */}
+      {pinReplaceModal && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+          zIndex: 2000,
+        }}>
+          <div style={{
+            background: 'var(--s1)', borderRadius: 12, padding: 20,
+            maxWidth: 400, width: '90%', border: '1px solid var(--bd)',
+            boxShadow: '0 10px 40px rgba(0,0,0,0.2)',
+          }}>
+            <h3 style={{ fontSize: 16, fontWeight: 700, color: 'var(--t1)', fontFamily: 'var(--fh)', margin: '0 0 12px 0' }}>
+              Replace a pinned message
+            </h3>
+            <p style={{ fontSize: 13, color: 'var(--t3)', fontFamily: 'var(--fu)', margin: '0 0 16px 0' }}>
+              You've reached the 3-pin limit. Select a pinned message to replace:
+            </p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+              {pinReplaceModal.currentPins.map(pin => (
+                <label key={pin.id} style={{
+                  display: 'flex', alignItems: 'center', gap: 10, padding: 10,
+                  borderRadius: 8, border: '1px solid var(--bd)', cursor: 'pointer',
+                  transition: 'background 150ms',
+                }} onMouseEnter={e => e.currentTarget.style.background = 'var(--s2)'} onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+                  <input
+                    type="radio"
+                    name="pin-replace"
+                    value={pin.id}
+                    onChange={() => {}}
+                    onClick={() => handleReplacePin(pin.id)}
+                    style={{ cursor: 'pointer' }}
+                  />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--t1)', fontFamily: 'var(--fu)', marginBottom: 2 }}>
+                      {pin.sender_name}
+                    </div>
+                    <div style={{ fontSize: 12, color: 'var(--t3)', fontFamily: 'var(--fu)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {pin.content}
+                    </div>
+                  </div>
+                </label>
+              ))}
+            </div>
+            <button
+              onClick={closePinReplaceModal}
+              style={{
+                width: '100%', padding: '8px 16px', borderRadius: 8, border: 'none',
+                background: 'var(--s3)', color: 'var(--t2)', fontSize: 13, fontWeight: 600,
+                fontFamily: 'var(--fu)', cursor: 'pointer', transition: 'background 150ms',
+              }}
+              onMouseEnter={e => e.currentTarget.style.background = 'var(--bd)'}
+              onMouseLeave={e => e.currentTarget.style.background = 'var(--s3)'}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* ── Task creation popover (portal) ── */}
       {taskTarget && (
@@ -1726,10 +1830,21 @@ function TaskPopover({ msg, caseId, studentName, orgMembers, anchorRect, onClose
 }
 
 /* ─── Individual message row ─────────────────────────────────────────── */
-function MessageRow({ msg, isMe, palette, grouped, reply, onReply, onDelete, onMakeTask, onPin, onUnpin, isPinned }) {
+function MessageRow({ msg, isMe, palette, grouped, reply, onReply, onDelete, onMakeTask, onPin, onUnpin, isPinned, isHighlighted, onReplyJump }) {
   const [hover,       setHover]       = useState(false);
   const [pinFeedback, setPinFeedback] = useState(false); // brief confirmation state
+  const [copyFeedback, setCopyFeedback] = useState(false); // brief copy confirmation
   const makeTaskRef   = useRef(null);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(msg.content || '');
+      setCopyFeedback(true);
+      setTimeout(() => setCopyFeedback(false), 1500);
+    } catch (e) {
+      console.error('[MessageRow] copy error:', e);
+    }
+  };
 
   return (
     <div
@@ -1762,11 +1877,15 @@ function MessageRow({ msg, isMe, palette, grouped, reply, onReply, onDelete, onM
 
         {/* Reply preview */}
         {reply && (
-          <div style={{
-            padding: '4px 8px', borderRadius: '6px 6px 0 0',
-            background: 'var(--s3)', borderLeft: `2px solid ${palette.color}`,
-            marginBottom: 1, maxWidth: '100%',
-          }}>
+          <div
+            onClick={onReplyJump}
+            style={{
+              padding: '4px 8px', borderRadius: '6px 6px 0 0',
+              background: 'var(--s3)', borderLeft: `2px solid ${palette.color}`,
+              marginBottom: 1, maxWidth: '100%',
+              cursor: onReplyJump ? 'pointer' : 'default',
+            }}
+          >
             <div style={{ fontSize: 10, fontWeight: 700, color: palette.color, fontFamily: 'var(--fu)', marginBottom: 1 }}>
               {reply.sender_name}
             </div>
@@ -1777,21 +1896,26 @@ function MessageRow({ msg, isMe, palette, grouped, reply, onReply, onDelete, onM
         )}
 
         {/* Bubble */}
-        <div style={{
-          padding: '7px 11px',
-          borderRadius: reply
-            ? '0 8px 8px 8px'
-            : grouped
-              ? (isMe ? '8px 4px 4px 8px' : '4px 8px 8px 4px')
-              : (isMe ? '8px 4px 8px 8px' : '4px 8px 8px 8px'),
-          background: isMe ? 'var(--p)' : 'var(--s2)',
-          border: isMe ? 'none' : `1px solid ${isPinned ? 'rgba(13,148,136,.35)' : 'var(--bd)'}`,
-          borderLeft: isPinned && !isMe ? '3px solid #0D9488' : undefined,
-          color: isMe ? '#fff' : 'var(--t1)',
-          fontSize: 13, fontFamily: 'var(--fu)', lineHeight: 1.5,
-          wordBreak: 'break-word', whiteSpace: 'pre-wrap',
-          position: 'relative',
-        }}>
+        <div
+          data-message-id={msg.id}
+          style={{
+            padding: '7px 11px',
+            borderRadius: reply
+              ? '0 8px 8px 8px'
+              : grouped
+                ? (isMe ? '8px 4px 4px 8px' : '4px 8px 8px 4px')
+                : (isMe ? '8px 4px 8px 8px' : '4px 8px 8px 8px'),
+            background: isHighlighted
+              ? 'rgba(250, 204, 21, 0.3)'
+              : (isMe ? 'var(--p)' : 'var(--s2)'),
+            border: isMe ? 'none' : `1px solid ${isPinned ? 'rgba(13,148,136,.35)' : 'var(--bd)'}`,
+            borderLeft: isPinned && !isMe ? '3px solid #0D9488' : undefined,
+            color: isMe ? '#fff' : 'var(--t1)',
+            fontSize: 13, fontFamily: 'var(--fu)', lineHeight: 1.5,
+            wordBreak: 'break-word', whiteSpace: 'pre-wrap',
+            position: 'relative',
+            transition: 'background 0.3s ease',
+          }}>
           {/* Render tags as coloured pills inside message */}
           {renderMessageContent(msg.content || '', isMe)}
         </div>
@@ -1829,6 +1953,26 @@ function MessageRow({ msg, isMe, palette, grouped, reply, onReply, onDelete, onM
           }}
         >
           <Reply size={14}/>
+        </button>
+        <button
+          onClick={handleCopy}
+          title="Copy"
+          style={{
+            width: copyFeedback ? 68 : 28, height: 28, borderRadius: 6, border: 'none',
+            background: copyFeedback ? 'rgba(5,150,105,.15)' : 'var(--s3)',
+            color: copyFeedback ? '#059669' : 'var(--t3)',
+            cursor: 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 3,
+            transition: 'all .15s', overflow: 'hidden', whiteSpace: 'nowrap',
+            fontSize: 9, fontWeight: 700, fontFamily: 'var(--fu)',
+          }}
+          onMouseEnter={e => { if (!copyFeedback) { e.currentTarget.style.background = 'rgba(29,107,232,.15)'; e.currentTarget.style.color = 'var(--p)'; } }}
+          onMouseLeave={e => { if (!copyFeedback) { e.currentTarget.style.background = 'var(--s3)'; e.currentTarget.style.color = 'var(--t3)'; } }}
+        >
+          {copyFeedback
+            ? <><Check size={10}/> Copied</>
+            : <Copy size={14}/>
+          }
         </button>
         <button
           ref={makeTaskRef}
