@@ -100,12 +100,13 @@ const PAGE_SIZE = 50;
 /* ════════════════════════════════════════════════════════════════════════
    MAIN COMPONENT
 ════════════════════════════════════════════════════════════════════════ */
-export default function ChatThread({ caseId, studentName }) {
-  // Read session once into a ref — getOrgSession() returns a new object every
-  // call (JSON.parse), so calling it in the render body makes session?.org_id
-  // look like a new value on every render, causing the realtime useEffect to
-  // tear down and recreate the channel on every keystroke/hover/state update.
-  const sessionRef = useRef(getOrgSession());
+export default function ChatThread({ caseId, studentName, session: propSession }) {
+  // Read session once into a ref — prefer prop session, fall back to sessionStorage
+  // getOrgSession() returns a new object every call (JSON.parse), so calling it
+  // in the render body makes session?.org_id look like a new value on every render,
+  // causing the realtime useEffect to tear down and recreate the channel on every
+  // keystroke/hover/state update.
+  const sessionRef = useRef(propSession || getOrgSession());
   const session    = sessionRef.current;
   const myId       = session?.member_id || null;
   const myName     = session?.name || session?.email || 'You';

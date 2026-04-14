@@ -663,6 +663,7 @@ export default function GlobalInbox({ session, onOpenCase, onOpenDashboard }) {
               <ChatThread
                 caseId={selectedCaseId}
                 studentName={selectedCaseName}
+                session={sess}
               />
             </div>
           </>
