@@ -594,10 +594,14 @@ export default function ChatThread({ caseId, studentName, session: propSession }
     const { newMsg, currentPins } = pinReplaceModal;
     const now = new Date().toISOString();
 
+    console.log('[ChatThread] handleReplacePin - selectedPinId:', selectedPinId, 'newMsg.id:', newMsg.id);
+    console.log('[ChatThread] currentPins count:', currentPins.length);
+
     // Close modal first
     setPinReplaceModal(null);
 
     // Perform DB operations atomically - unpin first, then pin
+    console.log('[ChatThread] Unpinning message:', selectedPinId);
     const { error: unpinError } = await supabase
       .from('chat_messages')
       .update({ is_pinned: false, pinned_at: null, pinned_by_name: null })
@@ -608,7 +612,9 @@ export default function ChatThread({ caseId, studentName, session: propSession }
       console.error('[ChatThread] unpin error:', unpinError);
       return;
     }
+    console.log('[ChatThread] Unpin successful');
 
+    console.log('[ChatThread] Pinning message:', newMsg.id);
     const { error: pinError } = await supabase
       .from('chat_messages')
       .update({ is_pinned: true, pinned_at: now, pinned_by_name: myName })
@@ -625,6 +631,7 @@ export default function ChatThread({ caseId, studentName, session: propSession }
         .eq('org_id', session.org_id);
       return;
     }
+    console.log('[ChatThread] Pin successful');
 
     // Only update optimistic state after DB operations succeed
     setMessages(prev => prev.map(m =>
@@ -642,6 +649,7 @@ export default function ChatThread({ caseId, studentName, session: propSession }
     });
 
     // Reload pinned messages from DB to ensure consistency
+    console.log('[ChatThread] Reloading pinned messages from DB');
     loadPinnedMessages();
   }
 
