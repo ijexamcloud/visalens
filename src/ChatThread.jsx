@@ -440,13 +440,14 @@ export default function ChatThread({ caseId, studentName, session: propSession }
     const text = draft.trim();
     if (!text || !caseId || !session?.org_id || sending) return;
     setSending(true);
-    setDraft('');
-    setMentionedIds([]);
-    const currentReplyTo = replyTo;
-    setReplyTo(null);
+    try {
+      setDraft('');
+      setMentionedIds([]);
+      const currentReplyTo = replyTo;
+      setReplyTo(null);
 
-    const tags        = extractTags(text);
-    const finalMentionedIds = mentionedIds.length ? mentionedIds : null;
+      const tags        = extractTags(text);
+      const finalMentionedIds = mentionedIds.length ? mentionedIds : null;
 
     // Optimistic insert — sender sees message immediately regardless of
     // realtime latency or RLS evaluation delay on the subscription payload
@@ -494,27 +495,33 @@ export default function ChatThread({ caseId, studentName, session: propSession }
       ));
 
       // Write notifications for every @mentioned person (skip self)
-      const notifRows = mentions
-        .filter(m => m.id !== myId)
-        .map(m => ({
-          recipient_id:   m.id,
-          org_id:         session.org_id,
-          type:           'mention',
-          sender_name:     myName,
-          case_id:        caseId,
-          message_id:     inserted.id,
-          message_preview: text.slice(0, 120),
-          is_read:        false,
-        }));
-      if (notifRows.length) {
-        const { error: notifErr } = await supabase.from('notifications').insert(notifRows);
-        if (notifErr) console.warn('[ChatThread] notification insert failed:', notifErr);
+      if (finalMentionedIds && finalMentionedIds.length) {
+        const mentionedMembers = orgMembers.filter(m => finalMentionedIds.includes(m.id));
+        const notifRows = mentionedMembers
+          .filter(m => m.id !== myId)
+          .map(m => ({
+            recipient_id:   m.id,
+            org_id:         session.org_id,
+            type:           'mention',
+            sender_name:     myName,
+            case_id:        caseId,
+            message_id:     inserted.id,
+            message_preview: text.slice(0, 120),
+            is_read:        false,
+          }));
+        if (notifRows.length) {
+          const { error: notifErr } = await supabase.from('notifications').insert(notifRows);
+          if (notifErr) console.warn('[ChatThread] notification insert failed:', notifErr);
+        }
       }
     }
-
-    setSending(false);
-    markAsRead();
-    inputRef.current?.focus();
+    } catch (e) {
+      console.error('[ChatThread] send error:', e);
+    } finally {
+      setSending(false);
+      markAsRead();
+      inputRef.current?.focus();
+    }
   }
 
   /* ─── Soft delete ─────────────────────────────────────────────────── */
