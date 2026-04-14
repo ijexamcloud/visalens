@@ -313,7 +313,7 @@ export default function GlobalInbox({ session, onOpenCase, onOpenDashboard }) {
           if (!error && data) setConversations(data);
           // If RPC fails silently here, the optimistic state is good enough
         })
-        .catch(() => { /* non-critical */ });
+        .catch((e) => { console.warn('[GlobalInbox] Targeted re-fetch failed (drift may persist):', e); });
     }
   }
 
