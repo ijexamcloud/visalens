@@ -563,9 +563,15 @@ export default function ChatThread({ caseId, studentName, session: propSession }
     if (!session?.org_id || !caseId) return;
     const now = new Date().toISOString();
 
-    console.log('[ChatThread] handlePin - msg.id:', msg.id);
+    console.log('[ChatThread] handlePin - msg.id:', msg.id, 'is optimistic:', !!msg._optimistic);
     console.log('[ChatThread] current pinnedMessages count:', pinnedMessages.length);
     console.log('[ChatThread] pinnedMessages:', pinnedMessages.map(p => ({ id: p.id, content: p.content?.slice(0, 20) })));
+
+    // Check if message is optimistic (not yet saved to DB)
+    if (msg._optimistic) {
+      console.error('[ChatThread] Cannot pin optimistic message - not saved to DB yet');
+      return;
+    }
 
     // Check 3-pin limit before proceeding
     const currentPinnedCount = pinnedMessages.filter(m => m.id !== msg.id).length;
@@ -589,7 +595,7 @@ export default function ChatThread({ caseId, studentName, session: propSession }
     });
     setPinnedBarOpen(true);
 
-    console.log('[ChatThread] Updating DB for pin');
+    console.log('[ChatThread] Updating DB for pin - msg.id:', msg.id, 'org_id:', session.org_id);
     const { data: pinData, error } = await supabase
       .from('chat_messages')
       .update({ is_pinned: true, pinned_at: now, pinned_by_name: myName })
