@@ -211,7 +211,7 @@ export default function ChatThread({ caseId, studentName, session: propSession }
   async function loadPinnedMessages() {
     if (!caseId || !session?.org_id) return;
     try {
-      console.log('[ChatThread] loadPinnedMessages - caseId:', caseId);
+
       const { data } = await supabase
         .from('chat_messages')
         .select('*')
@@ -220,11 +220,7 @@ export default function ChatThread({ caseId, studentName, session: propSession }
         .eq('is_pinned', true)
         .eq('is_deleted', false)
         .order('pinned_at', { ascending: true });
-      console.log('[ChatThread] loadPinnedMessages - DB returned:', data?.length || 0, 'pinned messages');
-      if (data) {
-        console.log('[ChatThread] loadPinnedMessages - pinned messages:', data.map(p => ({ id: p.id, content: p.content?.slice(0, 20) })));
-        setPinnedMessages(data);
-      }
+      if (data) setPinnedMessages(data);
     } catch (e) {
       console.error('[ChatThread] loadPinnedMessages error:', e);
     }
@@ -563,23 +559,13 @@ export default function ChatThread({ caseId, studentName, session: propSession }
     if (!session?.org_id || !caseId) return;
     const now = new Date().toISOString();
 
-    console.log('[ChatThread] handlePin - msg.id:', msg.id, 'is optimistic:', !!msg._optimistic);
-    console.log('[ChatThread] current pinnedMessages count:', pinnedMessages.length);
-    console.log('[ChatThread] pinnedMessages:', pinnedMessages.map(p => ({ id: p.id, content: p.content?.slice(0, 20) })));
-
     // Check if message is optimistic (not yet saved to DB)
-    if (msg._optimistic) {
-      console.error('[ChatThread] Cannot pin optimistic message - not saved to DB yet');
-      return;
-    }
+    if (msg._optimistic) return;
 
     // Check 3-pin limit before proceeding
     const currentPinnedCount = pinnedMessages.filter(m => m.id !== msg.id).length;
-    console.log('[ChatThread] currentPinnedCount (excluding this msg):', currentPinnedCount);
 
     if (currentPinnedCount >= 3) {
-      // Show replacement modal
-      console.log('[ChatThread] 3-pin limit reached, showing replacement modal');
       setPinReplaceModal({ newMsg: msg, currentPins: pinnedMessages });
       return;
     }
@@ -595,79 +581,66 @@ export default function ChatThread({ caseId, studentName, session: propSession }
     });
     setPinnedBarOpen(true);
 
-    console.log('[ChatThread] Updating DB for pin - msg.id:', msg.id, 'org_id:', session.org_id);
-    
-    // First, check if the message exists in DB and what org_id it has
-    const { data: existingMsg, error: checkError } = await supabase
-      .from('chat_messages')
-      .select('id, org_id, case_id, is_pinned')
-      .eq('id', msg.id)
-      .single();
-    
-    if (checkError) {
-      console.error('[ChatThread] Message check error:', checkError);
-    } else {
-      console.log('[ChatThread] Existing message in DB:', existingMsg);
-    }
-
+    // Update DB — include org_id filter to satisfy RLS UPDATE policy
+    // (same pattern as handleDelete). Avoid .single(): 0-row matches would
+    // return PGRST116 and cause a false rollback.
     const { data: pinData, error } = await supabase
       .from('chat_messages')
       .update({ is_pinned: true, pinned_at: now, pinned_by_name: myName })
       .eq('id', msg.id)
       .eq('org_id', session.org_id)
-      .select('id, is_pinned, pinned_at')
-      .single();
+      .select('id, is_pinned, pinned_at');
 
     if (error) {
       console.error('[ChatThread] pin error:', error);
-      // Roll back
+      // Roll back optimistic state
       setMessages(prev => prev.map(m => m.id === msg.id ? msg : m));
       setPinnedMessages(prev => prev.filter(p => p.id !== msg.id));
-    } else {
-      console.log('[ChatThread] pin DB update successful - DB returned:', pinData);
+    } else if (!pinData || pinData.length === 0) {
+      // 0 rows updated — message may not be accessible via RLS; roll back
+      console.error('[ChatThread] pin — 0 rows updated for msg.id:', msg.id, '(RLS or id mismatch)');
+      setMessages(prev => prev.map(m => m.id === msg.id ? msg : m));
+      setPinnedMessages(prev => prev.filter(p => p.id !== msg.id));
     }
   }
 
   /* ─── Handle pin replacement modal selection ───────────────────────── */
   async function handleReplacePin(selectedPinId) {
     if (!pinReplaceModal || !session?.org_id || !caseId) return;
-    const { newMsg, currentPins } = pinReplaceModal;
+    const { newMsg } = pinReplaceModal;
     const now = new Date().toISOString();
-
-    console.log('[ChatThread] handleReplacePin - selectedPinId:', selectedPinId, 'newMsg.id:', newMsg.id);
-    console.log('[ChatThread] currentPins count:', currentPins.length);
 
     // Close modal first
     setPinReplaceModal(null);
 
-    // Perform DB operations atomically - unpin first, then pin
-    console.log('[ChatThread] Unpinning message:', selectedPinId);
+    // Perform DB operations: unpin first, then pin.
+    // Avoid .single() — 0 rows matched returns PGRST116 which masks the real problem.
     const { data: unpinData, error: unpinError } = await supabase
       .from('chat_messages')
       .update({ is_pinned: false, pinned_at: null, pinned_by_name: null })
       .eq('id', selectedPinId)
       .eq('org_id', session.org_id)
-      .select('id, is_pinned')
-      .single();
+      .select('id, is_pinned');
 
     if (unpinError) {
       console.error('[ChatThread] unpin error:', unpinError);
       return;
     }
-    console.log('[ChatThread] Unpin successful - DB returned:', unpinData);
+    if (!unpinData || unpinData.length === 0) {
+      console.error('[ChatThread] handleReplacePin — 0 rows updated for unpin, id:', selectedPinId);
+      return;
+    }
 
-    console.log('[ChatThread] Pinning message:', newMsg.id);
     const { data: pinData, error: pinError } = await supabase
       .from('chat_messages')
       .update({ is_pinned: true, pinned_at: now, pinned_by_name: myName })
       .eq('id', newMsg.id)
       .eq('org_id', session.org_id)
-      .select('id, is_pinned, pinned_at')
-      .single();
+      .select('id, is_pinned, pinned_at');
 
-    if (pinError) {
-      console.error('[ChatThread] pin error:', pinError);
-      // Re-pin the original message since pin failed
+    if (pinError || !pinData || pinData.length === 0) {
+      console.error('[ChatThread] pin error in replace:', pinError || '0 rows updated');
+      // Re-pin the original message since the new pin failed
       await supabase
         .from('chat_messages')
         .update({ is_pinned: true, pinned_at: now, pinned_by_name: myName })
@@ -675,7 +648,6 @@ export default function ChatThread({ caseId, studentName, session: propSession }
         .eq('org_id', session.org_id);
       return;
     }
-    console.log('[ChatThread] Pin successful - DB returned:', pinData);
 
     // Only update optimistic state after DB operations succeed
     setMessages(prev => prev.map(m =>
@@ -693,7 +665,6 @@ export default function ChatThread({ caseId, studentName, session: propSession }
     });
 
     // Reload pinned messages from DB to ensure consistency
-    console.log('[ChatThread] Reloading pinned messages from DB');
     loadPinnedMessages();
   }
 
