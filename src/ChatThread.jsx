@@ -192,7 +192,6 @@ export default function ChatThread({ caseId, studentName, session: propSession }
 
   /* ─── Fetch org members for @mention and task assignee picker ─────────────────── */
   useEffect(() => {
-    console.log('[ChatThread] orgMembers fetch - session:', session, 'myId:', myId);
     if (!session?.org_id) return;
     supabase
       .from('profiles')
@@ -202,7 +201,6 @@ export default function ChatThread({ caseId, studentName, session: propSession }
       .neq('id', myId)  // exclude self — no point @mentioning yourself
       .order('full_name', { ascending: true })
       .then(({ data }) => {
-        console.log('[ChatThread] orgMembers loaded:', data);
         if (data) setOrgMembers(data);
       });
   }, [session?.org_id, myId]);
@@ -402,16 +400,13 @@ export default function ChatThread({ caseId, studentName, session: propSession }
     const cursor = e.target.selectionStart;
     const textUpToCursor = val.slice(0, cursor);
     const atIdx = textUpToCursor.lastIndexOf('@');
-    console.log('[ChatThread] handleDraftChange - val:', val, 'cursor:', cursor, 'atIdx:', atIdx);
     if (atIdx !== -1) {
       const fragment = textUpToCursor.slice(atIdx + 1);
-      console.log('[ChatThread] fragment:', fragment, 'hasSpace:', /\s/.test(fragment));
       // Only open popover if fragment has no spaces (mid-word typing)
       if (!/\s/.test(fragment)) {
         setMentionQuery(fragment);
         setMentionOpen(true);
         setMentionIndex(0);
-        console.log('[ChatThread] opening mention popover');
         return;
       }
     }
