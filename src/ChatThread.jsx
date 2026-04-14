@@ -620,24 +620,28 @@ export default function ChatThread({ caseId, studentName, session: propSession }
 
     // Perform DB operations atomically - unpin first, then pin
     console.log('[ChatThread] Unpinning message:', selectedPinId);
-    const { error: unpinError } = await supabase
+    const { data: unpinData, error: unpinError } = await supabase
       .from('chat_messages')
       .update({ is_pinned: false, pinned_at: null, pinned_by_name: null })
       .eq('id', selectedPinId)
-      .eq('org_id', session.org_id);
+      .eq('org_id', session.org_id)
+      .select('id, is_pinned')
+      .single();
 
     if (unpinError) {
       console.error('[ChatThread] unpin error:', unpinError);
       return;
     }
-    console.log('[ChatThread] Unpin successful');
+    console.log('[ChatThread] Unpin successful - DB returned:', unpinData);
 
     console.log('[ChatThread] Pinning message:', newMsg.id);
-    const { error: pinError } = await supabase
+    const { data: pinData, error: pinError } = await supabase
       .from('chat_messages')
       .update({ is_pinned: true, pinned_at: now, pinned_by_name: myName })
       .eq('id', newMsg.id)
-      .eq('org_id', session.org_id);
+      .eq('org_id', session.org_id)
+      .select('id, is_pinned, pinned_at')
+      .single();
 
     if (pinError) {
       console.error('[ChatThread] pin error:', pinError);
@@ -649,7 +653,7 @@ export default function ChatThread({ caseId, studentName, session: propSession }
         .eq('org_id', session.org_id);
       return;
     }
-    console.log('[ChatThread] Pin successful');
+    console.log('[ChatThread] Pin successful - DB returned:', pinData);
 
     // Only update optimistic state after DB operations succeed
     setMessages(prev => prev.map(m =>
