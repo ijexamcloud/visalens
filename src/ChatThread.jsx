@@ -596,6 +596,20 @@ export default function ChatThread({ caseId, studentName, session: propSession }
     setPinnedBarOpen(true);
 
     console.log('[ChatThread] Updating DB for pin - msg.id:', msg.id, 'org_id:', session.org_id);
+    
+    // First, check if the message exists in DB and what org_id it has
+    const { data: existingMsg, error: checkError } = await supabase
+      .from('chat_messages')
+      .select('id, org_id, case_id, is_pinned')
+      .eq('id', msg.id)
+      .single();
+    
+    if (checkError) {
+      console.error('[ChatThread] Message check error:', checkError);
+    } else {
+      console.log('[ChatThread] Existing message in DB:', existingMsg);
+    }
+
     const { data: pinData, error } = await supabase
       .from('chat_messages')
       .update({ is_pinned: true, pinned_at: now, pinned_by_name: myName })
