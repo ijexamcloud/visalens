@@ -122,6 +122,11 @@ export default function ChatThread({ caseId, studentName }) {
 
   // org members for task assignee picker
   const [orgMembers,    setOrgMembers]    = useState([]);
+  // @mention state
+  const [mentionQuery,  setMentionQuery]  = useState('');
+  const [mentionOpen,   setMentionOpen]   = useState(false);
+  const [mentionedIds,  setMentionedIds]  = useState([]);
+  const [mentionIndex,  setMentionIndex]  = useState(0);
   // task popover state: { msg, anchorRect } | null
   const [taskTarget,    setTaskTarget]    = useState(null);
 
@@ -137,6 +142,7 @@ export default function ChatThread({ caseId, studentName }) {
   const inputRef   = useRef(null);
   const searchRef  = useRef(null);
   const bottomRef  = useRef(null);
+  const mentionPopoverRef = useRef(null);
   const isMountedRef = useRef(true);
   const retryCountRef = useRef(0);
 
@@ -173,13 +179,17 @@ export default function ChatThread({ caseId, studentName }) {
     setSearchText('');
     setTagFilter('');
     setPinnedMessages([]);
+    setMentionOpen(false);
+    setMentionQuery('');
+    setMentionedIds([]);
+    setMentionIndex(0);
     loadMessages(0, false);
     loadPinnedMessages();
     // Mark thread as read when opened
     markAsRead();
   }, [caseId, loadMessages]);
 
-  /* ─── Fetch org members for task assignee picker ─────────────────── */
+  /* ─── Fetch org members for @mention and task assignee picker ─────────────────── */
   useEffect(() => {
     if (!session?.org_id) return;
     supabase
@@ -187,9 +197,10 @@ export default function ChatThread({ caseId, studentName }) {
       .select('id, full_name')
       .eq('org_id', session.org_id)
       .eq('is_active', true)
+      .neq('id', myId)  // exclude self — no point @mentioning yourself
       .order('full_name', { ascending: true })
       .then(({ data }) => { if (data) setOrgMembers(data); });
-  }, [session?.org_id]);
+  }, [session?.org_id, myId]);
 
   /* ─── Load pinned messages for this thread ──────────────────────── */
   async function loadPinnedMessages() {
@@ -372,18 +383,67 @@ export default function ChatThread({ caseId, studentName }) {
     return results;
   }
 
+  const mentionSuggestions = React.useMemo(() => {
+    if (!mentionQuery) return orgMembers.slice(0, 8);
+    const q = mentionQuery.toLowerCase();
+    return orgMembers.filter(m => m.full_name?.toLowerCase().startsWith(q)).slice(0, 8);
+  }, [orgMembers, mentionQuery]);
+
+  // Detect '@' trigger in draft text and open/close the popover
+  function handleDraftChange(e) {
+    const val = e.target.value;
+    setDraft(val);
+    // Find the last '@' in the text that isn't followed by a space yet
+    const cursor = e.target.selectionStart;
+    const textUpToCursor = val.slice(0, cursor);
+    const atIdx = textUpToCursor.lastIndexOf('@');
+    if (atIdx !== -1) {
+      const fragment = textUpToCursor.slice(atIdx + 1);
+      // Only open popover if fragment has no spaces (mid-word typing)
+      if (!/\s/.test(fragment)) {
+        setMentionQuery(fragment);
+        setMentionOpen(true);
+        setMentionIndex(0);
+        return;
+      }
+    }
+    setMentionOpen(false);
+    setMentionQuery('');
+    setMentionIndex(0);
+  }
+
+  // Insert selected member into the draft at the '@' position
+  function selectMention(member) {
+    const cursor = inputRef.current?.selectionStart ?? draft.length;
+    const textUpToCursor = draft.slice(0, cursor);
+    const atIdx = textUpToCursor.lastIndexOf('@');
+    const before = draft.slice(0, atIdx);
+    const after = draft.slice(cursor);
+    const inserted = `@${member.full_name} `;
+    setDraft(before + inserted + after);
+    setMentionedIds(prev => [...new Set([...prev, member.id])]);
+    setMentionOpen(false);
+    setMentionQuery('');
+    setMentionIndex(0);
+    setTimeout(() => {
+      const newPos = before.length + inserted.length;
+      inputRef.current?.focus();
+      inputRef.current?.setSelectionRange(newPos, newPos);
+    }, 0);
+  }
+
   /* ─── Send message ────────────────────────────────────────────────── */
   async function handleSend() {
     const text = draft.trim();
     if (!text || !caseId || !session?.org_id || sending) return;
     setSending(true);
     setDraft('');
+    setMentionedIds([]);
     const currentReplyTo = replyTo;
     setReplyTo(null);
 
     const tags        = extractTags(text);
-    const mentions    = extractMentions(text);
-    const mentionedIds = mentions.map(m => m.id);
+    const mentionedIds = mentionedIds.length ? mentionedIds : null;
 
     // Optimistic insert — sender sees message immediately regardless of
     // realtime latency or RLS evaluation delay on the subscription payload
@@ -638,6 +698,26 @@ export default function ChatThread({ caseId, studentName }) {
 
   /* ─── Keyboard shortcuts ──────────────────────────────────────────── */
   function handleKeyDown(e) {
+    if (mentionOpen) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setMentionIndex(prev => Math.min(prev + 1, mentionSuggestions.length - 1));
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setMentionIndex(prev => Math.max(prev - 1, 0));
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        if (mentionSuggestions[mentionIndex]) {
+          selectMention(mentionSuggestions[mentionIndex]);
+        }
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        setMentionOpen(false);
+        setMentionQuery('');
+        setMentionIndex(0);
+      }
+      return;
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSend();
@@ -1091,7 +1171,7 @@ export default function ChatThread({ caseId, studentName }) {
         <textarea
           ref={inputRef}
           value={draft}
-          onChange={e => setDraft(e.target.value)}
+          onChange={handleDraftChange}
           onKeyDown={handleKeyDown}
           placeholder={`Message about ${studentName}…`}
           rows={1}
@@ -1110,6 +1190,63 @@ export default function ChatThread({ caseId, studentName }) {
             e.target.style.height = Math.min(e.target.scrollHeight, 100) + 'px';
           }}
         />
+        {/* ── @mention popover ── */}
+        {mentionOpen && mentionSuggestions.length > 0 && (
+          <div
+            ref={mentionPopoverRef}
+            style={{
+              position: 'absolute',
+              bottom: '100%',
+              left: 0,
+              marginBottom: 4,
+              width: 240,
+              maxHeight: 200,
+              overflowY: 'auto',
+              background: 'var(--s1)',
+              border: '1px solid var(--bd)',
+              borderRadius: 8,
+              boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
+              zIndex: 1000,
+            }}
+          >
+            {mentionSuggestions.map((member, idx) => (
+              <div
+                key={member.id}
+                onClick={() => selectMention(member)}
+                style={{
+                  padding: '8px 12px',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  background: idx === mentionIndex ? 'var(--s2)' : 'transparent',
+                }}
+                onMouseEnter={() => setMentionIndex(idx)}
+              >
+                <div
+                  style={{
+                    width: 24,
+                    height: 24,
+                    borderRadius: '50%',
+                    background: 'rgba(29,107,232,.12)',
+                    border: '1.5px solid rgba(29,107,232,.25)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontSize: 9,
+                    fontWeight: 800,
+                    color: '#1D6BE8',
+                  }}
+                >
+                  {(member.full_name || '?').split(' ').slice(0, 2).map(w => w[0]?.toUpperCase() || '').join('')}
+                </div>
+                <span style={{ fontSize: 12, color: 'var(--t1)', fontFamily: 'var(--fu)' }}>
+                  {member.full_name}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
         <button
           onClick={handleSend}
           disabled={!draft.trim() || sending}
