@@ -109,7 +109,9 @@ export async function authedFetch(url, options = {}, supabase, _isRetry = false)
             expires_at:    data.session.expires_at,
           });
         }
-      } catch {}
+      } catch (e) {
+        console.error('[VisaLens] Token refresh retry failed:', e.message);
+      }
     }
     return authedFetch(url, options, supabase, true); // Retry exactly once
   }

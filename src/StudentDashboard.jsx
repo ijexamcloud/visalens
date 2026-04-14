@@ -2261,7 +2261,7 @@ function ChatThreadInline({ caseId, studentName }) {
       case_id:caseId, org_id:session.org_id, member_id:myId,
       member_name:myName, last_read_at:new Date().toISOString(),
     },{onConflict:'case_id,member_id'}); }
-    catch{}
+    catch(e){ console.error('[StudentDashboard] markChatRead error:', e); }
   }
 
   // ── @mention: grant chat_reads access to mentioned members ───────────
@@ -2281,7 +2281,7 @@ function ChatThreadInline({ caseId, studentName }) {
     });
     try {
       await supabase.from('chat_reads').upsert(rows, { onConflict:'case_id,member_id' });
-    } catch {}
+    } catch(e){ console.error('[StudentDashboard] grantMentionAccess error:', e); }
   }
 
   // Parse @Name mentions from the draft text — resolve to member UUIDs

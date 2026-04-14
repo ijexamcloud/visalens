@@ -258,8 +258,12 @@ export default function ChatThread({ caseId, studentName }) {
     if (!caseId || !session?.org_id) return;
 
     let channel = null;
+    const isMounted = useRef(true);
+    const retryCount = useRef(0);
+    const MAX_RETRIES = 5;
 
     function subscribe() {
+      if (!isMounted.current) return;
       if (channel) supabase.removeChannel(channel);
       channel = supabase
         .channel(`chat-${caseId}-${Date.now()}`)
@@ -305,7 +309,18 @@ export default function ChatThread({ caseId, studentName }) {
         })
         .subscribe(status => {
           if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-            setTimeout(subscribe, 2000);
+            if (retryCount.current >= MAX_RETRIES) {
+              console.warn('[ChatThread] Max retries reached, giving up');
+              return;
+            }
+            const backoffMs = Math.min(2000 * Math.pow(2, retryCount.current), 30000);
+            retryCount.current++;
+            console.log(`[ChatThread] Retry attempt ${retryCount.current}/${MAX_RETRIES} in ${backoffMs}ms`);
+            setTimeout(() => {
+              if (isMounted.current) subscribe();
+            }, backoffMs);
+          } else if (status === 'SUBSCRIBED') {
+            retryCount.current = 0;
           }
         });
     }
@@ -329,6 +344,7 @@ export default function ChatThread({ caseId, studentName }) {
     });
 
     return () => {
+      isMounted.current = false;
       if (channel) supabase.removeChannel(channel);
       authListener?.unsubscribe();
     };
@@ -367,7 +383,7 @@ export default function ChatThread({ caseId, studentName }) {
 
     // Optimistic insert — sender sees message immediately regardless of
     // realtime latency or RLS evaluation delay on the subscription payload
-    const optimisticId = `optimistic-${Date.now()}`;
+    const optimisticId = `optimistic-${crypto.randomUUID()}`;
     const optimisticMsg = {
       id:           optimisticId,
       case_id:      caseId,

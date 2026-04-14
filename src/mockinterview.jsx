@@ -540,7 +540,7 @@ export const MockInterview = ({ caseId, mode: initialMode = 'university', onComp
   };
   const handleShare = async () => {
     if (navigator.share) {
-      try { await navigator.share({ title: `Interview Report — ${studentName}`, text: buildReportText() }); } catch {}
+      try { await navigator.share({ title: `Interview Report — ${studentName}`, text: buildReportText() }); } catch(e) { console.error('[MockInterview] Share error:', e); }
     } else { handleCopy(); }
   };
 

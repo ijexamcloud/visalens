@@ -281,6 +281,7 @@ export default function NotificationBell({ session }) {
 
   const bellRef    = useRef(null);
   const supabaseRef = useRef(getSupabase());
+  const retryTimerRef = useRef(null);
   // Stable ref — never changes reference, so useEffect deps don't thrash the channel
   if (!supabaseRef.current) supabaseRef.current = getSupabase();
   const supabase  = supabaseRef.current;
@@ -370,7 +371,7 @@ export default function NotificationBell({ session }) {
         // On error, retry once after 3s with a fresh channel
         if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
           supabase.removeChannel(channel);
-          setTimeout(() => {
+          retryTimerRef.current = setTimeout(() => {
             if (!supabase || !memberId) return;
             channel = supabase
               .channel(`notif-bell-${memberId}-retry-${Date.now()}`)
@@ -387,7 +388,13 @@ export default function NotificationBell({ session }) {
           }, 3000);
         }
       });
-    return () => supabase.removeChannel(channel);
+    return () => {
+      supabase.removeChannel(channel);
+      if (retryTimerRef.current) {
+        clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
+    };
   // memberId intentionally only dep — supabase is a stable singleton ref
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [memberId]);
