@@ -590,11 +590,13 @@ export default function ChatThread({ caseId, studentName, session: propSession }
     setPinnedBarOpen(true);
 
     console.log('[ChatThread] Updating DB for pin');
-    const { error } = await supabase
+    const { data: pinData, error } = await supabase
       .from('chat_messages')
       .update({ is_pinned: true, pinned_at: now, pinned_by_name: myName })
       .eq('id', msg.id)
-      .eq('org_id', session.org_id);
+      .eq('org_id', session.org_id)
+      .select('id, is_pinned, pinned_at')
+      .single();
 
     if (error) {
       console.error('[ChatThread] pin error:', error);
@@ -602,7 +604,7 @@ export default function ChatThread({ caseId, studentName, session: propSession }
       setMessages(prev => prev.map(m => m.id === msg.id ? msg : m));
       setPinnedMessages(prev => prev.filter(p => p.id !== msg.id));
     } else {
-      console.log('[ChatThread] pin DB update successful');
+      console.log('[ChatThread] pin DB update successful - DB returned:', pinData);
     }
   }
 
