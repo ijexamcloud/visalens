@@ -107,9 +107,9 @@ function formatBubble(text) {
 
 // ─── ChatPanel ────────────────────────────────────────────────────────────────
 export default function ChatPanel({ profileData, results, docs, messages, setMessages, onCreditsUpdate }) {
-  const [input,       setInput]       = useState("");
-  const [chatLoading, setChatLoading] = useState(false);
-  const [copied,      setCopied]      = useState(false);
+  const [input,          setInput]          = useState("");
+  const [chatLoading,    setChatLoading]    = useState(false);
+  const [copied,         setCopied]         = useState(false);
   const bottomRef   = useRef(null);
   const textareaRef = useRef(null);
 

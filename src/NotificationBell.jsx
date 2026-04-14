@@ -279,9 +279,12 @@ export default function NotificationBell({ session }) {
   const [anchorRect,    setAnchorRect]    = useState(null);
   const [diagError,     setDiagError]     = useState(null);
 
-  const bellRef  = useRef(null);
-  const supabase = getSupabase();
-  const memberId = session?.member_id;
+  const bellRef    = useRef(null);
+  const supabaseRef = useRef(getSupabase());
+  // Stable ref — never changes reference, so useEffect deps don't thrash the channel
+  if (!supabaseRef.current) supabaseRef.current = getSupabase();
+  const supabase  = supabaseRef.current;
+  const memberId  = session?.member_id;
 
   // ── Load ──────────────────────────────────────────────────────────────────
   const loadNotifications = useCallback(async (fromPage = 0, append = false) => {
@@ -336,7 +339,9 @@ export default function NotificationBell({ session }) {
       if (!append) setUnreadCount(data.filter(n => !n.is_read).length);
     }
     setLoading(false);
-  }, [supabase, memberId]);
+  // supabase intentionally excluded — it's a stable singleton ref
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [memberId]);
 
   useEffect(() => {
     console.log('[NotifBell] mount — session:', session, 'memberId:', memberId, 'supabase ready:', !!supabase);
@@ -346,13 +351,14 @@ export default function NotificationBell({ session }) {
   // ── Real-time ─────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!supabase || !memberId) return;
-    console.log('[NotifBell] subscribing realtime for member:', memberId);
-    const channel = supabase
-      .channel(`notif-bell-${memberId}`)
+    // Unique channel name per mount prevents collision when component remounts
+    const channelName = `notif-bell-${memberId}-${Date.now()}`;
+    console.log('[NotifBell] subscribing realtime:', channelName);
+    let channel = supabase
+      .channel(channelName)
       .on('postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'notifications', filter: `recipient_id=eq.${memberId}` },
         payload => {
-          console.log('[NotifBell] realtime INSERT received:', payload.new);
           const n = payload.new;
           if (!n?.id) return;
           setNotifications(prev => [n, ...prev]);
@@ -361,9 +367,30 @@ export default function NotificationBell({ session }) {
       )
       .subscribe((status) => {
         console.log('[NotifBell] realtime channel status:', status);
+        // On error, retry once after 3s with a fresh channel
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          supabase.removeChannel(channel);
+          setTimeout(() => {
+            if (!supabase || !memberId) return;
+            channel = supabase
+              .channel(`notif-bell-${memberId}-retry-${Date.now()}`)
+              .on('postgres_changes',
+                { event: 'INSERT', schema: 'public', table: 'notifications', filter: `recipient_id=eq.${memberId}` },
+                payload => {
+                  const n = payload.new;
+                  if (!n?.id) return;
+                  setNotifications(prev => [n, ...prev]);
+                  setUnreadCount(c => c + 1);
+                }
+              )
+              .subscribe((s) => console.log('[NotifBell] retry channel status:', s));
+          }, 3000);
+        }
       });
     return () => supabase.removeChannel(channel);
-  }, [supabase, memberId]);
+  // memberId intentionally only dep — supabase is a stable singleton ref
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [memberId]);
 
   // ── Bell click ────────────────────────────────────────────────────────────
   function handleBellClick() {

@@ -26,7 +26,7 @@ import {
   PenLine, Mail, TrendingUp, Calendar, AlertCircle, Activity,
   Loader2, Search, ChevronDown, Filter, RefreshCw, Check,
   GraduationCap, User, MapPin, Phone, Clipboard,
-  ChevronRight, Download,
+  ChevronRight, Download, Printer,
 } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
 import CaseTasks from './CaseTasks';
@@ -231,7 +231,7 @@ function TimelineEventCard({ event, isLast }) {
 ════════════════════════════════════════════════════════════════════════ */
 const ALL_CATS = ['email', 'status_change', 'task', 'calendar', 'document', 'note', 'system'];
 
-function TimelineTab({ caseId }) {
+function TimelineTab({ caseId, caseData }) {
   const session = getOrgSession();
   const [events,   setEvents]   = useState([]);
   const [loading,  setLoading]  = useState(true);
@@ -302,6 +302,150 @@ function TimelineTab({ caseId }) {
     return Object.entries(groups);
   }, [filtered]);
 
+  /* ─── Print / Export PDF ─────────────────────────────────────────── */
+  function printTimeline() {
+    const pd = caseData?.profileData || {};
+    const targets = caseData?.applicationTargets || [];
+    const statusCfg = STATUS_COLORS[caseData?.leadStatus] || STATUS_COLORS['None'];
+
+    // Build events sorted oldest→newest for print
+    const printEvents = [...events].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+
+    const categoryColors = {
+      email: '#1D6BE8', status_change: '#059669', task: '#7C3AED',
+      calendar: '#D97706', document: '#4F46E5', note: '#0D9488', system: '#64748B',
+    };
+    const categoryLabels = {
+      email: 'Email', status_change: 'Status', task: 'Task',
+      calendar: 'Calendar', document: 'Document', note: 'Note', system: 'System',
+    };
+
+    function getCat(ev) {
+      const c = ev.event_category || ev.source || 'system';
+      if (c === 'email_auto') return 'email';
+      if (c === 'manual') return 'note';
+      return categoryColors[c] ? c : 'system';
+    }
+
+    function fmtTs(iso) {
+      if (!iso) return '';
+      return new Date(iso).toLocaleString('en-GB', {
+        day: 'numeric', month: 'short', year: 'numeric',
+        hour: '2-digit', minute: '2-digit',
+      });
+    }
+
+    const metaFields = [
+      ['Counsellor', caseData?.counsellorName],
+      ['Country', caseData?.targetCountry],
+      ['Phone', pd.phone || pd.phoneNumber || pd.mobile],
+      ['Email', pd.email],
+      ['IELTS', pd.ielts || pd.ieltsScore],
+      ['CGPA', pd.cgpa],
+      ['Source', caseData?.referralSource],
+      ['Payment', caseData?.paymentStatus],
+      ['Case opened', fmtDate(caseData?.savedAt)],
+      ['Expiry', caseData?.expiryDate ? `${caseData.expiryDocType || 'Doc'}: ${fmtDate(caseData.expiryDate)}` : null],
+    ].filter(([, v]) => v);
+
+    const targetRows = targets.slice(0, 10).map(t => {
+      const isOffer = t.status === 'Offer' || t.status === 'Accepted' || t.has_offer || t.offer_letter;
+      return `<tr style="background:${isOffer ? '#f0fdf4' : '#fff'}">
+        <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;font-weight:600;color:${isOffer ? '#059669' : '#1e293b'}">
+          ${t.university || t.institution || '—'}
+        </td>
+        <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;color:#475569">${t.program || '—'}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;color:#475569">${t.intake_date || t.intake || '—'}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0">
+          ${isOffer ? '<span style="background:#dcfce7;color:#059669;padding:2px 7px;border-radius:4px;font-size:11px;font-weight:700">✓ Offer</span>' : `<span style="color:#94a3b8;font-size:12px">${t.status || '—'}</span>`}
+        </td>
+      </tr>`;
+    }).join('');
+
+    const eventRows = printEvents.map(ev => {
+      const cat = getCat(ev);
+      const color = categoryColors[cat] || '#64748B';
+      const label = categoryLabels[cat] || cat;
+      const title = ev.title || ev.doc_type || ev.summary?.slice(0, 80) || 'Event';
+      const body  = ev.description || ev.summary || ev.ai_summary || '';
+      const actor = ev.actor_name || ev.university_name || '';
+      return `<tr>
+        <td style="padding:7px 10px;border-bottom:1px solid #f1f5f9;white-space:nowrap;vertical-align:top">
+          <span style="background:${color}18;color:${color};padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em">${label}</span>
+        </td>
+        <td style="padding:7px 10px;border-bottom:1px solid #f1f5f9;color:#64748b;font-size:11px;white-space:nowrap;vertical-align:top">${fmtTs(ev.created_at)}</td>
+        <td style="padding:7px 10px;border-bottom:1px solid #f1f5f9;font-weight:600;color:#1e293b;vertical-align:top">${title}</td>
+        <td style="padding:7px 10px;border-bottom:1px solid #f1f5f9;color:#475569;font-size:12px;vertical-align:top">${body.slice(0, 300)}${body.length > 300 ? '…' : ''}</td>
+        <td style="padding:7px 10px;border-bottom:1px solid #f1f5f9;color:#94a3b8;font-size:11px;white-space:nowrap;vertical-align:top">${actor}</td>
+      </tr>`;
+    }).join('');
+
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/>
+<title>Case Report — ${caseData?.studentName || 'Unknown'}</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#1e293b;background:#fff;font-size:13px;line-height:1.5}
+  @page{size:A4 landscape;margin:18mm 16mm}
+  @media print{.no-print{display:none!important}}
+  .no-print{position:fixed;top:16px;right:16px;padding:8px 18px;background:#1D6BE8;color:#fff;border:none;border-radius:7px;font-size:13px;font-weight:700;cursor:pointer;z-index:999}
+  h1{font-size:22px;font-weight:800;color:#0f172a;margin-bottom:4px}
+  h2{font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#64748b;margin:20px 0 8px}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  th{padding:7px 10px;background:#f8fafc;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#64748b;text-align:left;border-bottom:2px solid #e2e8f0}
+  .meta-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-bottom:16px}
+  .meta-item .label{font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:#94a3b8;margin-bottom:2px}
+  .meta-item .value{font-weight:600;color:#1e293b;font-size:12px}
+  .header{display:flex;justify-content:space-between;align-items:flex-start;padding-bottom:16px;border-bottom:2px solid #e2e8f0;margin-bottom:20px}
+  .badge{display:inline-block;padding:3px 10px;border-radius:5px;font-size:11px;font-weight:700;background:${statusCfg.bg};color:${statusCfg.color}}
+  .section{margin-bottom:24px;page-break-inside:avoid}
+  .events-section{page-break-before:always}
+</style></head><body>
+<button class="no-print" onclick="window.print()">🖨 Print / Save PDF</button>
+
+<div class="header">
+  <div>
+    <h1>${caseData?.studentName || 'Unknown Student'}</h1>
+    ${caseData?.caseSerial ? `<div style="color:#64748b;font-size:12px;margin-top:3px">#${caseData.caseSerial}</div>` : ''}
+    <div style="margin-top:8px"><span class="badge">${caseData?.leadStatus || 'None'}</span></div>
+  </div>
+  <div style="text-align:right;color:#94a3b8;font-size:11px">
+    <div>Exported ${new Date().toLocaleString('en-GB', { day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit' })}</div>
+    <div style="margin-top:4px">VisaLens Case Report</div>
+  </div>
+</div>
+
+<div class="section">
+  <h2>Profile</h2>
+  <div class="meta-grid">
+    ${metaFields.map(([l, v]) => `<div class="meta-item"><div class="label">${l}</div><div class="value">${v}</div></div>`).join('')}
+  </div>
+</div>
+
+${targets.length > 0 ? `
+<div class="section">
+  <h2>Programs (${targets.length})</h2>
+  <table>
+    <thead><tr><th>University</th><th>Program</th><th>Intake</th><th>Status</th></tr></thead>
+    <tbody>${targetRows}</tbody>
+  </table>
+</div>` : ''}
+
+<div class="section events-section">
+  <h2>Timeline (${printEvents.length} event${printEvents.length !== 1 ? 's' : ''})</h2>
+  <table>
+    <thead><tr><th>Type</th><th>Date &amp; Time</th><th>Event</th><th>Details</th><th>By</th></tr></thead>
+    <tbody>${eventRows}</tbody>
+  </table>
+</div>
+
+</body></html>`;
+
+    const win = window.open('', '_blank');
+    if (!win) { alert('Please allow pop-ups to export the PDF.'); return; }
+    win.document.write(html);
+    win.document.close();
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       {/* Toolbar */}
@@ -365,6 +509,26 @@ function TimelineTab({ caseId }) {
           color: 'var(--t3)', cursor: 'pointer', display: 'flex', alignItems: 'center',
         }}>
           <RefreshCw size={12} />
+        </button>
+
+        {/* Export PDF */}
+        <button
+          onClick={printTimeline}
+          disabled={events.length === 0}
+          title="Export timeline as PDF"
+          style={{
+            display: 'flex', alignItems: 'center', gap: 5,
+            padding: '7px 10px', borderRadius: 7,
+            border: '1px solid var(--bd)',
+            background: events.length > 0 ? 'var(--s1)' : 'var(--s2)',
+            color: events.length > 0 ? 'var(--t2)' : 'var(--t3)',
+            fontSize: 'var(--text-xs)', fontFamily: 'var(--fu)',
+            fontWeight: 600, cursor: events.length > 0 ? 'pointer' : 'default',
+            opacity: events.length > 0 ? 1 : 0.5,
+          }}
+        >
+          <Printer size={11} />
+          Export PDF
         </button>
       </div>
 
@@ -465,15 +629,16 @@ function NotesTab({ caseId }) {
     if (!text.trim() || saving) return;
     setSaving(true);
     const { error } = await supabase.from('doc_events').insert({
-      case_id: caseId,
-      org_id: session.org_id,
+      case_id:        caseId,
+      org_id:         session.org_id,
       event_category: 'note',
-      doc_type: 'counsellor_note',
-      source: 'manual',
-      summary: text.trim(),
+      doc_type:       'counsellor_note',
+      source:         'manual',
+      changed_fields: [],
+      summary:        text.trim(),
       university_name: myName,
-      confidence: 1.0,
-      created_at: new Date().toISOString(),
+      confidence:     1.0,
+      created_at:     new Date().toISOString(),
     });
     if (!error) {
       setText('');
@@ -671,12 +836,125 @@ function CaseOverview({ caseData }) {
 }
 
 /* ════════════════════════════════════════════════════════════════════════
+   PRINT TASKS
+════════════════════════════════════════════════════════════════════════ */
+async function printTasks(caseId, caseData, session) {
+  if (!caseId || !session?.org_id) return;
+
+  // Fetch all tasks fresh (can't rely on CaseTasks state from here)
+  const { data: tasks, error } = await supabase
+    .from('case_tasks')
+    .select('*')
+    .eq('case_id', caseId)
+    .eq('org_id', session.org_id)
+    .order('created_at', { ascending: true });
+
+  if (error || !tasks) { alert('Could not load tasks.'); return; }
+
+  const open      = tasks.filter(t => t.status !== 'done');
+  const completed = tasks.filter(t => t.status === 'done');
+  const sorted    = [...open, ...completed];
+
+  const statusCfg = STATUS_COLORS[caseData?.leadStatus] || STATUS_COLORS['None'];
+
+  const PRIORITY_COLORS = {
+    urgent: '#DC2626', high: '#FC471C', medium: '#D97706', low: '#059669',
+  };
+
+  function fmtTs(iso) {
+    if (!iso) return '—';
+    return new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+  }
+
+  const taskRows = sorted.map(t => {
+    const isDone    = t.status === 'done';
+    const pColor    = PRIORITY_COLORS[t.priority] || '#64748B';
+    const rowBg     = isDone ? '#f8fafc' : '#ffffff';
+    const textColor = isDone ? '#94a3b8' : '#1e293b';
+    return `<tr style="background:${rowBg}">
+      <td style="padding:7px 10px;border-bottom:1px solid #f1f5f9;vertical-align:top">
+        ${isDone
+          ? '<span style="background:#dcfce7;color:#059669;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:700">✓ Done</span>'
+          : '<span style="background:#eff6ff;color:#1D6BE8;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:700">Open</span>'
+        }
+      </td>
+      <td style="padding:7px 10px;border-bottom:1px solid #f1f5f9;font-weight:600;color:${textColor};vertical-align:top;${isDone ? 'text-decoration:line-through;' : ''}">${t.title || '—'}</td>
+      <td style="padding:7px 10px;border-bottom:1px solid #f1f5f9;vertical-align:top">
+        ${t.priority ? `<span style="background:${pColor}18;color:${pColor};padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700;text-transform:capitalize">${t.priority}</span>` : '—'}
+      </td>
+      <td style="padding:7px 10px;border-bottom:1px solid #f1f5f9;color:#475569;font-size:12px;vertical-align:top">${t.assigned_to_name || '—'}</td>
+      <td style="padding:7px 10px;border-bottom:1px solid #f1f5f9;color:#475569;font-size:12px;vertical-align:top">${t.created_by_name || '—'}</td>
+      <td style="padding:7px 10px;border-bottom:1px solid #f1f5f9;color:${t.due_date && new Date(t.due_date) < new Date() && !isDone ? '#DC2626' : '#475569'};font-size:12px;vertical-align:top">${fmtTs(t.due_date)}</td>
+      <td style="padding:7px 10px;border-bottom:1px solid #f1f5f9;color:#94a3b8;font-size:11px;vertical-align:top">${fmtTs(t.created_at)}</td>
+      <td style="padding:7px 10px;border-bottom:1px solid #f1f5f9;color:#475569;font-size:12px;vertical-align:top">${isDone ? (t.completed_by_name || '—') : '—'}</td>
+    </tr>`;
+  }).join('');
+
+  const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/>
+<title>Tasks — ${caseData?.studentName || 'Unknown'}</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#1e293b;background:#fff;font-size:13px;line-height:1.5}
+  @page{size:A4 landscape;margin:18mm 16mm}
+  @media print{.no-print{display:none!important}}
+  .no-print{position:fixed;top:16px;right:16px;padding:8px 18px;background:#1D6BE8;color:#fff;border:none;border-radius:7px;font-size:13px;font-weight:700;cursor:pointer;z-index:999}
+  h1{font-size:22px;font-weight:800;color:#0f172a;margin-bottom:4px}
+  h2{font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#64748b;margin:20px 0 8px}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  th{padding:7px 10px;background:#f8fafc;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#64748b;text-align:left;border-bottom:2px solid #e2e8f0}
+  .header{display:flex;justify-content:space-between;align-items:flex-start;padding-bottom:16px;border-bottom:2px solid #e2e8f0;margin-bottom:20px}
+  .badge{display:inline-block;padding:3px 10px;border-radius:5px;font-size:11px;font-weight:700;background:${statusCfg.bg};color:${statusCfg.color}}
+  .stats{display:flex;gap:20px;margin-bottom:16px}
+  .stat{padding:10px 16px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0}
+  .stat .n{font-size:22px;font-weight:800;color:#0f172a}
+  .stat .l{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:#94a3b8;margin-top:2px}
+</style></head><body>
+<button class="no-print" onclick="window.print()">🖨 Print / Save PDF</button>
+
+<div class="header">
+  <div>
+    <h1>${caseData?.studentName || 'Unknown Student'}</h1>
+    ${caseData?.caseSerial ? `<div style="color:#64748b;font-size:12px;margin-top:3px">#${caseData.caseSerial}</div>` : ''}
+    <div style="margin-top:8px"><span class="badge">${caseData?.leadStatus || 'None'}</span></div>
+  </div>
+  <div style="text-align:right;color:#94a3b8;font-size:11px">
+    <div>Exported ${new Date().toLocaleString('en-GB', { day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit' })}</div>
+    <div style="margin-top:4px">VisaLens · Task Report</div>
+  </div>
+</div>
+
+<div class="stats">
+  <div class="stat"><div class="n">${tasks.length}</div><div class="l">Total Tasks</div></div>
+  <div class="stat"><div class="n" style="color:#1D6BE8">${open.length}</div><div class="l">Open</div></div>
+  <div class="stat"><div class="n" style="color:#059669">${completed.length}</div><div class="l">Completed</div></div>
+  <div class="stat"><div class="n" style="color:#DC2626">${open.filter(t => t.due_date && new Date(t.due_date) < new Date()).length}</div><div class="l">Overdue</div></div>
+</div>
+
+<h2>Tasks (${tasks.length})</h2>
+<table>
+  <thead><tr>
+    <th>Status</th><th>Title</th><th>Priority</th>
+    <th>Assigned To</th><th>Created By</th><th>Due Date</th>
+    <th>Created</th><th>Completed By</th>
+  </tr></thead>
+  <tbody>${taskRows}</tbody>
+</table>
+</body></html>`;
+
+  const win = window.open('', '_blank');
+  if (!win) { alert('Please allow pop-ups to export the PDF.'); return; }
+  win.document.write(html);
+  win.document.close();
+}
+
+/* ════════════════════════════════════════════════════════════════════════
    MAIN COMPONENT
 ════════════════════════════════════════════════════════════════════════ */
 export default function CaseFile({
   caseId,
   caseData: caseDataProp = null,   // pass pre-loaded data from dashboard if available
   onClose,                          // () => void  — back button / close
+  onOpenFull,                       // (caseData) => void — navigate to full analyser, closes drawer too
   counsellorOptions = [],
 }) {
   const session = getOrgSession();
@@ -734,7 +1012,7 @@ export default function CaseFile({
   /* ─── Render ───────────────────────────────────────────────────────── */
   return (
     <div style={{
-      position: 'fixed', inset: 0, zIndex: 300,
+      position: 'fixed', inset: 0, zIndex: 500,
       background: 'var(--s1)',
       display: 'flex', flexDirection: 'column',
       fontFamily: 'var(--fu)',
@@ -754,6 +1032,17 @@ export default function CaseFile({
         }}>
           <ArrowLeft size={13} /> Back
         </button>
+        {onOpenFull && (
+          <button onClick={() => onOpenFull(caseData)} style={{
+            display: 'flex', alignItems: 'center', gap: 5,
+            padding: '6px 10px', borderRadius: 7,
+            border: '1px solid var(--bd)', background: 'var(--p)',
+            color: '#fff', cursor: 'pointer', fontSize: 'var(--text-xs)',
+            fontFamily: 'var(--fu)', fontWeight: 600,
+          }}>
+            <ExternalLink size={13} /> Open in Analyser
+          </button>
+        )}
 
         <div style={{ flex: 1 }}>
           {caseLoading ? (
@@ -833,10 +1122,31 @@ export default function CaseFile({
           {/* Tab content */}
           <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
             {activeTab === 'timeline' && resolvedId && (
-              <TimelineTab caseId={resolvedId} />
+              <TimelineTab caseId={resolvedId} caseData={caseData} />
             )}
             {activeTab === 'tasks' && resolvedId && (
               <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+                {/* Tasks tab toolbar with Export PDF */}
+                <div style={{
+                  padding: '10px 20px', borderBottom: '1px solid var(--bd)',
+                  display: 'flex', justifyContent: 'flex-end', alignItems: 'center',
+                  background: 'var(--s2)', flexShrink: 0, gap: 8,
+                }}>
+                  <button
+                    onClick={() => printTasks(resolvedId, caseData, session)}
+                    title="Export tasks as PDF"
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 5,
+                      padding: '7px 10px', borderRadius: 7,
+                      border: '1px solid var(--bd)', background: 'var(--s1)',
+                      color: 'var(--t2)', fontSize: 'var(--text-xs)',
+                      fontFamily: 'var(--fu)', fontWeight: 600, cursor: 'pointer',
+                    }}
+                  >
+                    <Printer size={11} />
+                    Export PDF
+                  </button>
+                </div>
                 <CaseTasks caseId={resolvedId} orgCounsellors={counsellorOptions} />
               </div>
             )}

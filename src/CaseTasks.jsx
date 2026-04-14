@@ -13,7 +13,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Plus, Check, Trash2, ChevronDown, Loader2,
-  Flag, User, Calendar, AlertCircle, ClipboardList,
+  Flag, User, Calendar, AlertCircle, ClipboardList, Clock,
 } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
 
@@ -61,10 +61,11 @@ function fmtDue(iso) {
 /* ════════════════════════════════════════════════════════════════════════
    MAIN COMPONENT
 ════════════════════════════════════════════════════════════════════════ */
-export default function CaseTasks({ caseId, orgCounsellors = [] }) {
+export default function CaseTasks({ caseId, orgCounsellors = [], studentName = '' }) {
+  // Re-read session on every render so member_id is never stale
   const session  = getOrgSession();
   const myName   = session?.name || session?.email || 'Me';
-  const myId     = session?.member_id || null;
+  const myId     = session?.member_id ?? session?.id ?? null;
 
   const [tasks,    setTasks]    = useState([]);
   const [loading,  setLoading]  = useState(true);
@@ -99,20 +100,25 @@ export default function CaseTasks({ caseId, orgCounsellors = [] }) {
   /* ─── Create task ─────────────────────────────────────────────────── */
   async function handleCreate() {
     const title = newTitle.trim();
-    if (!title || !caseId || !session?.org_id || saving) return;
+    // Read session fresh at call-time so member_id is never stale
+    const sess = getOrgSession();
+    if (!title || !caseId || !sess?.org_id || saving) return;
+    const createdById   = sess.member_id || null;
+    const createdByName = sess.name || sess.email || 'Me';
     setSaving(true);
 
     const now = new Date().toISOString();
     const payload = {
       case_id:           caseId,
-      org_id:            session.org_id,
+      org_id:            sess.org_id,
       title:             title,
       priority:          newPriority,
       due_date:          newDue || null,
       status:            'open',
-      assigned_to_id:    myId,
-      assigned_to_name:  newAssignee,
-      created_by_name:   myName,
+      assigned_to_id:    createdById,
+      assigned_to_name:  newAssignee || createdByName,
+      created_by_id:     createdById,
+      created_by_name:   createdByName,
       created_at:        now,
       completed_at:      null,
       completed_by_id:   null,
@@ -127,6 +133,25 @@ export default function CaseTasks({ caseId, orgCounsellors = [] }) {
 
     if (!error && data) {
       setTasks(prev => [...prev, data]);
+
+      // Post system message to chat thread so the task appears inline in the chat panel
+      supabase.from('chat_messages').insert({
+        case_id:      caseId,
+        org_id:       sess.org_id,
+        sender_id:    createdById,
+        sender_name:  createdByName,
+        sender_color: '#6B7280',
+        content:      `Task created: "${title}"` +
+          (newAssignee && newAssignee !== createdByName ? ` — assigned to ${newAssignee} by ${createdByName}` : ` — by ${createdByName}`) +
+          (newPriority !== 'medium' ? ` · ${newPriority}` : ''),
+        tags:        [],
+        attachments: [],
+        is_deleted:  false,
+        is_system:   true,
+        type:        'task_created',
+        task_id:     data.id || null,
+      }).then(({ error: e }) => { if (e) console.warn('[CaseTasks] chat msg error:', e); });
+
       setNewTitle('');
       setNewPriority('medium');
       setNewDue('');
@@ -495,13 +520,17 @@ function TaskRow({ task, onComplete, onDelete, done = false }) {
             </span>
           )}
 
-          {/* Assignee */}
+          {/* Assignee — show "assigned to X by Y" when creator differs from assignee */}
           {task.assigned_to_name && (
             <span style={{
               fontSize: 10, fontFamily: 'var(--fu)', color: 'var(--t3)',
               display: 'flex', alignItems: 'center', gap: 3,
             }}>
-              <User size={9}/>{task.assigned_to_name}
+              <User size={9}/>
+              {task.assigned_to_name !== task.created_by_name
+                ? `${task.assigned_to_name} (by ${task.created_by_name})`
+                : task.assigned_to_name
+              }
             </span>
           )}
 
@@ -509,6 +538,20 @@ function TaskRow({ task, onComplete, onDelete, done = false }) {
           {done && task.completed_by_name && (
             <span style={{ fontSize: 10, color: 'var(--t3)', fontFamily: 'var(--fu)' }}>
               ✓ {task.completed_by_name}
+            </span>
+          )}
+
+          {/* Created at */}
+          {task.created_at && (
+            <span style={{
+              fontSize: 10, fontFamily: 'var(--fu)', color: 'var(--t3)',
+              display: 'flex', alignItems: 'center', gap: 3,
+            }}>
+              <Clock size={9}/>
+              {new Date(task.created_at).toLocaleString('en-GB', {
+                day: 'numeric', month: 'short',
+                hour: '2-digit', minute: '2-digit',
+              })}
             </span>
           )}
         </div>

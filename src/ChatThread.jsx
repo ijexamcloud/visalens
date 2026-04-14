@@ -10,6 +10,9 @@
  * • Pagination: loads 50 at a time, "Load earlier" button
  * • Print view (Ctrl/Cmd+P aware, or dedicated print button)
  * • Tag pills (#tag extraction from message body)
+ * • Pin to Timeline (inserts doc_events row)
+ * • Task mention detection (task: "title" renders as a purple pill)
+ * • Read receipts (tiny avatar dots showing who has seen up to which message)
  */
 
 import React, {
@@ -19,7 +22,7 @@ import ReactDOM from 'react-dom';
 import {
   Send, Search, X, Reply, Trash2, Printer, ChevronUp,
   Loader2, Hash, MessageSquare, ClipboardList, Check,
-  Calendar, ChevronDown, User,
+  Calendar, ChevronDown, User, Pin, PinOff, Sparkles,
 } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
 
@@ -125,10 +128,15 @@ export default function ChatThread({ caseId, studentName }) {
   const [searchOpen,  setSearchOpen]  = useState(false);
   const [searchText,  setSearchText]  = useState('');
   const [tagFilter,   setTagFilter]   = useState('');
-
-  const bottomRef  = useRef(null);
+  const [readReceipts, setReadReceipts] = useState([]);
+  const [summarizing,  setSummarizing]  = useState(false);
+  const [summaryCard,  setSummaryCard]  = useState(null); // { text } | null
+  const [summaryOpen,  setSummaryOpen]  = useState(true);
+  const [pinnedMessages, setPinnedMessages] = useState([]);
+  const [pinnedBarOpen,  setPinnedBarOpen]  = useState(true);
   const inputRef   = useRef(null);
   const searchRef  = useRef(null);
+  const bottomRef  = useRef(null);
 
   /* ─── Load messages ───────────────────────────────────────────────── */
   const loadMessages = useCallback(async (fromOffset = 0, append = false) => {
@@ -162,7 +170,9 @@ export default function ChatThread({ caseId, studentName }) {
     setReplyTo(null);
     setSearchText('');
     setTagFilter('');
+    setPinnedMessages([]);
     loadMessages(0, false);
+    loadPinnedMessages();
     // Mark thread as read when opened
     markAsRead();
   }, [caseId, loadMessages]);
@@ -179,6 +189,22 @@ export default function ChatThread({ caseId, studentName }) {
       .then(({ data }) => { if (data) setOrgMembers(data); });
   }, [session?.org_id]);
 
+  /* ─── Load pinned messages for this thread ──────────────────────── */
+  async function loadPinnedMessages() {
+    if (!caseId || !session?.org_id) return;
+    try {
+      const { data } = await supabase
+        .from('chat_messages')
+        .select('*')
+        .eq('case_id', caseId)
+        .eq('org_id', session.org_id)
+        .eq('is_pinned', true)
+        .eq('is_deleted', false)
+        .order('pinned_at', { ascending: true });
+      if (data) setPinnedMessages(data);
+    } catch { /* non-critical */ }
+  }
+
   /* ─── Mark thread read (upsert chat_reads) ──────────────────────── */
   async function markAsRead() {
     if (!caseId || !myId || !session?.org_id) return;
@@ -188,8 +214,37 @@ export default function ChatThread({ caseId, studentName }) {
         member_id:    myId,
         last_read_at: new Date().toISOString(),
       }, { onConflict: 'case_id,member_id' });
+      // Refresh receipts so our own "seen" dot appears immediately
+      loadReadReceipts();
     } catch { /* non-critical */ }
   }
+
+  /* ─── Load read receipts for this thread ────────────────────────── */
+  async function loadReadReceipts() {
+    if (!caseId || !session?.org_id) return;
+    try {
+      const { data } = await supabase
+        .from('chat_reads')
+        .select('member_id, member_name, last_read_at')
+        .eq('case_id', caseId)
+        .eq('org_id', session.org_id);
+      if (data) setReadReceipts(data);
+    } catch { /* non-critical */ }
+  }
+
+  // Subscribe to chat_reads changes so receipts update in real-time
+  useEffect(() => {
+    if (!caseId || !session?.org_id) return;
+    loadReadReceipts();
+    const ch = supabase
+      .channel(`reads-${caseId}`)
+      .on('postgres_changes', {
+        event: '*', schema: 'public', table: 'chat_reads',
+        filter: `case_id=eq.${caseId}`,
+      }, () => loadReadReceipts())
+      .subscribe();
+    return () => supabase.removeChannel(ch);
+  }, [caseId, session?.org_id]);
 
   /* ─── Scroll to bottom on new messages ───────────────────────────── */
   useEffect(() => {
@@ -230,6 +285,23 @@ export default function ChatThread({ caseId, studentName }) {
           const updated = payload.new;
           if (!updated?.id) return;
           setMessages(prev => prev.map(m => m.id === updated.id ? { ...m, ...updated } : m));
+          // Sync pinned list when is_pinned changes
+          if ('is_pinned' in updated) {
+            setPinnedMessages(prev => {
+              if (updated.is_pinned && !updated.is_deleted) {
+                // Add if not already there
+                if (prev.some(p => p.id === updated.id)) {
+                  return prev.map(p => p.id === updated.id ? { ...p, ...updated } : p);
+                }
+                return [...prev, updated].sort((a, b) =>
+                  new Date(a.pinned_at || a.created_at) - new Date(b.pinned_at || b.created_at)
+                );
+              } else {
+                // Remove from pinned list
+                return prev.filter(p => p.id !== updated.id);
+              }
+            });
+          }
         })
         .subscribe(status => {
           if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
@@ -373,7 +445,127 @@ export default function ChatThread({ caseId, studentName }) {
     setMessages(prev => prev.map(m => m.id === msgId ? { ...m, is_deleted: true } : m));
   }
 
-  /* ─── Filtered view ───────────────────────────────────────────────── */
+  /* ─── Pin / Unpin message ────────────────────────────────────────── */
+  async function handlePin(msg) {
+    if (!session?.org_id || !caseId) return;
+    const now = new Date().toISOString();
+    // Optimistic update
+    const updated = { ...msg, is_pinned: true, pinned_at: now, pinned_by_name: myName };
+    setMessages(prev => prev.map(m => m.id === msg.id ? updated : m));
+    setPinnedMessages(prev => {
+      if (prev.some(p => p.id === msg.id)) return prev;
+      return [...prev, updated].sort((a, b) =>
+        new Date(a.pinned_at || a.created_at) - new Date(b.pinned_at || b.created_at)
+      );
+    });
+    setPinnedBarOpen(true);
+
+    const { error } = await supabase
+      .from('chat_messages')
+      .update({ is_pinned: true, pinned_at: now, pinned_by_name: myName })
+      .eq('id', msg.id)
+      .eq('org_id', session.org_id);
+    if (error) {
+      console.error('[ChatThread] pin error:', error);
+      // Roll back
+      setMessages(prev => prev.map(m => m.id === msg.id ? msg : m));
+      setPinnedMessages(prev => prev.filter(p => p.id !== msg.id));
+    }
+  }
+
+  async function handleUnpin(msgId) {
+    if (!session?.org_id) return;
+    // Optimistic update
+    setMessages(prev => prev.map(m => m.id === msgId ? { ...m, is_pinned: false, pinned_at: null, pinned_by_name: null } : m));
+    setPinnedMessages(prev => prev.filter(p => p.id !== msgId));
+
+    const { error } = await supabase
+      .from('chat_messages')
+      .update({ is_pinned: false, pinned_at: null, pinned_by_name: null })
+      .eq('id', msgId)
+      .eq('org_id', session.org_id);
+    if (error) {
+      console.error('[ChatThread] unpin error:', error);
+      loadPinnedMessages(); // re-sync on failure
+    }
+  }
+
+  /* ─── Summarize team chat via AI ─────────────────────────────────── */
+  async function summarizeChat() {
+    if (!caseId || !session?.org_id || summarizing) return;
+    setSummarizing(true);
+    try {
+      // Fetch last 50 non-deleted, non-system messages
+      const { data: chatMsgs, error } = await supabase
+        .from('chat_messages')
+        .select('sender_name, content, created_at')
+        .eq('case_id', caseId)
+        .eq('org_id', session.org_id)
+        .eq('is_deleted', false)
+        .eq('is_system', false)
+        .order('created_at', { ascending: false })
+        .limit(50);
+
+      if (error) throw new Error(error.message);
+      if (!chatMsgs || chatMsgs.length === 0) {
+        setSummaryCard({ text: 'No messages found to summarize.' });
+        setSummaryOpen(true);
+        return;
+      }
+
+      const lines = [...chatMsgs].reverse()
+        .map(m => `[${m.sender_name}]: ${m.content}`)
+        .join('\n');
+
+      const PROXY_URL = import.meta.env.VITE_PROXY_URL || 'https://visalens-proxy.ijecloud.workers.dev';
+      const { data: { session: authSession } } = await supabase.auth.getSession();
+      const token = authSession?.access_token || session.access_token || '';
+
+      const resp = await fetch(PROXY_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          org_id:     session.org_id,
+          model:      'claude-haiku-4-5-20251001',
+          max_tokens: 400,
+          system:     'You are summarizing a visa case team chat. Extract: key decisions made, pending actions, who is responsible for what, any deadlines mentioned. Be concise — max 150 words. Format with short bullet points grouped under bold headings: **Decisions**, **Pending Actions**, **Deadlines**. Omit any heading that has nothing to report.',
+          messages:   [{ role: 'user', content: `Summarize this team chat:\n\n${lines}` }],
+        }),
+      });
+
+      const data = await resp.json();
+      if (data.error) throw new Error(data.error.message || 'API error');
+      const summaryText = data.content?.map(b => b.text || '').join('') || '(no summary)';
+
+      setSummaryCard({ text: summaryText });
+      setSummaryOpen(true);
+
+      // Persist as system message so all team members see it in the thread
+      await supabase.from('chat_messages').insert({
+        case_id:      caseId,
+        org_id:       session.org_id,
+        sender_id:    myId,
+        sender_name:  myName,
+        sender_color: '#6B7280',
+        content:      `📋 AI Chat Summary\n\n${summaryText}`,
+        tags:         [],
+        attachments:  [],
+        is_deleted:   false,
+        is_system:    true,
+        type:         'ai_summary',
+      });
+
+    } catch (e) {
+      setSummaryCard({ text: `⚠️ Could not summarize: ${e.message}` });
+      setSummaryOpen(true);
+      console.error('[ChatThread] summarize error:', e);
+    } finally {
+      setSummarizing(false);
+    }
+  }
   const displayMessages = useMemo(() => {
     let list = messages;
     if (searchText) {
@@ -445,7 +637,7 @@ export default function ChatThread({ caseId, studentName }) {
 
   return (
     <div style={{
-      display: 'flex', flexDirection: 'column', height: '100%',
+      display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0,
       background: 'var(--s1)',
     }}>
 
@@ -507,7 +699,77 @@ export default function ChatThread({ caseId, studentName }) {
         >
           <Printer size={13}/>
         </button>
+
+        <button
+          onClick={summarizeChat}
+          disabled={summarizing}
+          title={summarizing ? 'Summarizing…' : 'AI Summary — summarize this team chat'}
+          style={{
+            display: 'flex', alignItems: 'center', gap: summarizing ? 4 : 0,
+            padding: summarizing ? '0 9px' : '0',
+            width: summarizing ? 'auto' : 28,
+            height: 28, borderRadius: 6, border: 'none',
+            background: summarizing ? 'var(--s3)' : 'rgba(124,58,237,.1)',
+            color: summarizing ? 'var(--t3)' : '#7C3AED',
+            fontSize: 11, fontWeight: 700, fontFamily: 'var(--fu)',
+            cursor: summarizing ? 'default' : 'pointer', transition: 'all .15s',
+            whiteSpace: 'nowrap', flexShrink: 0,
+            justifyContent: 'center',
+          }}
+          onMouseEnter={e => { if (!summarizing) { e.currentTarget.style.background = 'rgba(124,58,237,.18)'; e.currentTarget.style.width = 'auto'; e.currentTarget.style.padding = '0 9px'; e.currentTarget.style.gap = '4px'; e.currentTarget.querySelector('.ai-lbl') && (e.currentTarget.querySelector('.ai-lbl').style.display = 'inline'); } }}
+          onMouseLeave={e => { if (!summarizing) { e.currentTarget.style.background = 'rgba(124,58,237,.1)'; e.currentTarget.style.width = '28px'; e.currentTarget.style.padding = '0'; e.currentTarget.style.gap = '0'; e.currentTarget.querySelector('.ai-lbl') && (e.currentTarget.querySelector('.ai-lbl').style.display = 'none'); } }}
+        >
+          {summarizing
+            ? <><Loader2 size={11} style={{ animation: 'spin .7s linear infinite' }}/> Summarizing…</>
+            : <><Sparkles size={13}/><span className="ai-lbl" style={{ display: 'none', fontSize: 11 }}>AI Summary</span></>
+          }
+        </button>
       </div>
+
+      {/* ── AI Summary card (collapsible, appears after first summary) ── */}
+      {summaryCard && (
+        <div style={{
+          flexShrink: 0, borderBottom: '1px solid var(--bd)',
+          background: 'rgba(124,58,237,.03)', overflow: 'hidden',
+        }}>
+          <div
+            onClick={() => setSummaryOpen(o => !o)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 7,
+              padding: '8px 14px', cursor: 'pointer',
+              borderBottom: summaryOpen ? '1px solid rgba(124,58,237,.1)' : 'none',
+            }}
+          >
+            <Sparkles size={11} color="#7C3AED"/>
+            <span style={{ fontSize: 11, fontWeight: 700, color: '#7C3AED', fontFamily: 'var(--fu)', flex: 1 }}>
+              AI Chat Summary
+            </span>
+            <span style={{ fontSize: 9, color: 'var(--t3)', fontFamily: 'var(--fu)', marginRight: 4 }}>
+              saved to thread
+            </span>
+            {summaryOpen
+              ? <ChevronDown size={11} color="var(--t3)"/>
+              : <ChevronDown size={11} color="var(--t3)" style={{ transform: 'rotate(-90deg)' }}/>
+            }
+          </div>
+          {summaryOpen && (
+            <div style={{
+              padding: '10px 14px', fontSize: 12, color: 'var(--t1)',
+              fontFamily: 'var(--fu)', lineHeight: 1.6,
+            }}>
+              {summaryCard.text.split('\n').map((line, i) => {
+                if (/^\*\*(.+)\*\*$/.test(line)) {
+                  return <div key={i} style={{ fontWeight: 700, color: '#7C3AED', marginTop: i > 0 ? 8 : 0, fontSize: 11 }}>{line.replace(/\*\*/g, '')}</div>;
+                }
+                if (line.startsWith('• ') || line.startsWith('- ')) {
+                  return <div key={i} style={{ display: 'flex', gap: 5, marginTop: 3 }}><span style={{ color: '#7C3AED', flexShrink: 0 }}>•</span><span>{line.slice(2)}</span></div>;
+                }
+                return line ? <div key={i} style={{ marginTop: 3 }}>{line}</div> : null;
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ── Search bar ── */}
       {searchOpen && (
@@ -532,6 +794,97 @@ export default function ChatThread({ caseId, studentName }) {
             <button onClick={() => setSearchText('')} style={{ border: 'none', background: 'none', cursor: 'pointer', color: 'var(--t3)', padding: 0 }}>
               <X size={12}/>
             </button>
+          )}
+        </div>
+      )}
+
+      {/* ── Pinned messages bar ── */}
+      {pinnedMessages.length > 0 && (
+        <div style={{
+          flexShrink: 0,
+          borderBottom: '1px solid var(--bd)',
+          background: 'rgba(13,148,136,.04)',
+          overflow: 'hidden',
+        }}>
+          {/* Header row — always visible */}
+          <div
+            onClick={() => setPinnedBarOpen(o => !o)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 7,
+              padding: '7px 14px', cursor: 'pointer',
+              borderBottom: pinnedBarOpen ? '1px solid rgba(13,148,136,.15)' : 'none',
+            }}
+          >
+            <Pin size={11} color="#0D9488"/>
+            <span style={{ fontSize: 11, fontWeight: 700, color: '#0D9488', fontFamily: 'var(--fu)', flex: 1 }}>
+              {pinnedMessages.length} pinned {pinnedMessages.length === 1 ? 'message' : 'messages'}
+            </span>
+            {pinnedBarOpen
+              ? <ChevronDown size={11} color="#0D9488"/>
+              : <ChevronDown size={11} color="#0D9488" style={{ transform: 'rotate(-90deg)' }}/>
+            }
+          </div>
+          {/* Expandable list */}
+          {pinnedBarOpen && (
+            <div style={{ maxHeight: 220, overflowY: 'auto' }}>
+              {pinnedMessages.map((pm, i) => {
+                const palette = senderColor(pm.sender_name || '');
+                return (
+                  <div
+                    key={pm.id}
+                    style={{
+                      display: 'flex', alignItems: 'flex-start', gap: 8,
+                      padding: '7px 14px',
+                      borderBottom: i < pinnedMessages.length - 1 ? '1px solid rgba(13,148,136,.08)' : 'none',
+                      background: 'transparent',
+                      transition: 'background .1s',
+                    }}
+                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(13,148,136,.06)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                  >
+                    {/* Teal accent bar */}
+                    <div style={{ width: 2, alignSelf: 'stretch', borderRadius: 2, background: '#0D9488', flexShrink: 0, marginTop: 2 }}/>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 2 }}>
+                        <span style={{ fontSize: 10, fontWeight: 700, color: palette.color, fontFamily: 'var(--fu)' }}>
+                          {pm.sender_name}
+                        </span>
+                        <span style={{ fontSize: 9, color: 'var(--t3)', fontFamily: 'var(--fu)' }}>
+                          {fmtTime(pm.created_at)}
+                        </span>
+                        {pm.pinned_by_name && (
+                          <span style={{ fontSize: 9, color: 'var(--t3)', fontFamily: 'var(--fu)', marginLeft: 'auto' }}>
+                            pinned by {pm.pinned_by_name}
+                          </span>
+                        )}
+                      </div>
+                      <div style={{
+                        fontSize: 12, color: 'var(--t2)', fontFamily: 'var(--fu)',
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                        lineHeight: 1.4,
+                      }}>
+                        {pm.content}
+                      </div>
+                    </div>
+                    {/* Unpin button */}
+                    <button
+                      onClick={e => { e.stopPropagation(); handleUnpin(pm.id); }}
+                      title="Unpin"
+                      style={{
+                        width: 22, height: 22, borderRadius: 5, border: 'none',
+                        background: 'transparent', color: 'var(--t3)',
+                        cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        flexShrink: 0,
+                      }}
+                      onMouseEnter={e => { e.currentTarget.style.background = 'rgba(220,38,38,.1)'; e.currentTarget.style.color = '#DC2626'; }}
+                      onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--t3)'; }}
+                    >
+                      <X size={10}/>
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
           )}
         </div>
       )}
@@ -629,11 +982,61 @@ export default function ChatThread({ caseId, studentName }) {
                 reply={reply}
                 onReply={() => setReplyTo({ id: msg.id, sender_name: msg.sender_name, content: msg.content })}
                 onDelete={msg.sender_id === myId ? () => handleDelete(msg.id) : null}
-                onMakeTask={(anchorRect) => setTaskTarget({ msg, anchorRect })}
+              onMakeTask={(anchorRect) => setTaskTarget({ msg, anchorRect })}
+                onPin={() => handlePin(msg)}
+                onUnpin={() => handleUnpin(msg.id)}
+                isPinned={!!msg.is_pinned}
               />
             );
           })
         )}
+
+        {/* ── Read receipts row ── */}
+        {readReceipts.length > 0 && messages.length > 0 && (() => {
+          // For each reader (excluding self), find the last message they've seen
+          // by comparing last_read_at to message created_at timestamps
+          const others = readReceipts.filter(r => r.member_id !== myId);
+          if (!others.length) return null;
+
+          // Group readers by the last message id they've seen
+          const byMsg = {};
+          others.forEach(r => {
+            const lastSeen = [...messages]
+              .filter(m => !m.is_deleted && m.created_at <= r.last_read_at)
+              .pop();
+            if (!lastSeen) return;
+            if (!byMsg[lastSeen.id]) byMsg[lastSeen.id] = [];
+            byMsg[lastSeen.id].push(r);
+          });
+
+          return Object.entries(byMsg).map(([msgId, readers]) => (
+            <div key={`rcpt-${msgId}`} style={{
+              display: 'flex', justifyContent: 'flex-end', gap: 3,
+              paddingRight: 36, marginTop: 2,
+            }}>
+              {readers.map(r => {
+                const { bg, color } = senderColor(r.member_name || '');
+                const initials = (r.member_name || '?')
+                  .split(' ').slice(0, 2).map(w => w[0]?.toUpperCase() || '').join('');
+                return (
+                  <div
+                    key={r.member_id}
+                    title={`Seen by ${r.member_name}`}
+                    style={{
+                      width: 14, height: 14, borderRadius: '50%',
+                      background: bg, color, fontSize: 7, fontWeight: 700,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      border: `1px solid ${color}44`, fontFamily: 'var(--fh)',
+                    }}
+                  >
+                    {initials}
+                  </div>
+                );
+              })}
+            </div>
+          ));
+        })()}
+
         <div ref={bottomRef}/>
       </div>
 
@@ -705,6 +1108,32 @@ export default function ChatThread({ caseId, studentName }) {
           }
         </button>
       </div>
+
+      {/* ── Task creation popover (portal) ── */}
+      {taskTarget && (
+        <TaskPopover
+          msg={taskTarget.msg}
+          caseId={caseId}
+          studentName={studentName}
+          orgMembers={orgMembers}
+          anchorRect={taskTarget.anchorRect}
+          onClose={() => setTaskTarget(null)}
+          onCreated={(payload) => {
+            if (payload?.optimisticSysMsg) {
+              setMessages(prev => {
+                if (prev.some(m => m.id === payload.optimisticSysMsg.id)) return prev;
+                return [...prev, payload.optimisticSysMsg];
+              });
+            }
+            if (payload?.replaceOptimisticId && payload?.realId) {
+              setMessages(prev => prev.map(m =>
+                m.id === payload.replaceOptimisticId ? { ...m, id: payload.realId, _optimistic: false } : m
+              ));
+            }
+            setTaskTarget(null);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -753,9 +1182,23 @@ function TaskPopover({ msg, caseId, studentName, orgMembers, anchorRect, onClose
   const panelRef = useRef(null);
   const titleRef = useRef(null);
 
-  // Position: just below the anchor button, right-aligned
-  const top   = anchorRect ? Math.round(anchorRect.bottom + 6) : 60;
-  const right  = anchorRect ? Math.round(window.innerWidth - anchorRect.right) : 16;
+  const PANEL_HEIGHT = 340; // approximate height of the popover
+  const PANEL_WIDTH  = 300;
+
+  // Position: prefer below anchor; flip above if it would go off-screen bottom
+  const spaceBelow = anchorRect ? window.innerHeight - anchorRect.bottom - 8 : 999;
+  const spaceAbove = anchorRect ? anchorRect.top - 8 : 999;
+  const openUpward = anchorRect && spaceBelow < PANEL_HEIGHT && spaceAbove > spaceBelow;
+
+  const rawTop = anchorRect
+    ? (openUpward ? anchorRect.top - PANEL_HEIGHT - 6 : anchorRect.bottom + 6)
+    : 60;
+  // Clamp: never above viewport top, never below viewport bottom
+  const top = Math.max(8, Math.min(rawTop, window.innerHeight - PANEL_HEIGHT - 8));
+
+  // Right-align to anchor, but clamp so popover doesn't overflow left edge
+  const rawRight = anchorRect ? Math.round(window.innerWidth - anchorRect.right) : 16;
+  const right = Math.max(8, Math.min(rawRight, window.innerWidth - PANEL_WIDTH - 8));
 
   // Close on outside click
   useEffect(() => {
@@ -787,21 +1230,69 @@ function TaskPopover({ msg, caseId, studentName, orgMembers, anchorRect, onClose
     setSaving(false);
     if (!error) {
       // Signal 1 — system message in chat thread so everyone sees it inline
+      const sysContent = `Task created: "${title.trim()}"${assigneeName ? ` → assigned to ${assigneeName}` : ''}${priority !== 'medium' ? ` · ${priority}` : ''}`;
+      const optimisticSysId = `sys-optimistic-${Date.now()}`;
+      // Push optimistically so it renders immediately (realtime will dedup via real id)
+      onCreated?.({
+        optimisticSysMsg: {
+          id:          optimisticSysId,
+          case_id:     caseId,
+          org_id:      orgId,
+          sender_id:   myId,
+          sender_name: myName,
+          content:     sysContent,
+          tags:        [],
+          attachments: [],
+          is_deleted:  false,
+          is_system:   true,
+          type:        'task_created',
+          task_id:     newTask?.id || null,
+          created_at:  new Date().toISOString(),
+          _optimistic: true,
+        },
+      });
       supabase.from('chat_messages').insert({
         case_id:     caseId,
         org_id:      orgId,
         sender_id:   myId,
         sender_name: myName,
-        content:     `Task created: "${title.trim()}"${assigneeName ? ` → assigned to ${assigneeName}` : ''}${priority !== 'medium' ? ` · ${priority}` : ''}`,
+        content:     sysContent,
         tags:        [],
         attachments: [],
         is_deleted:  false,
         is_system:   true,
         type:        'task_created',
         task_id:     newTask?.id || null,
-      }).then(({ error: e }) => { if(e) console.warn('[ChatThread] system msg error:', e); });
+      }).select('id').single().then(({ data: sysRow, error: e }) => {
+        if (e) console.warn('[ChatThread] system msg error:', e);
+        // Replace optimistic row with real id so realtime dedup works
+        if (sysRow?.id) {
+          onCreated?.({ replaceOptimisticId: optimisticSysId, realId: sysRow.id });
+        }
+      });
 
-      // Signal 3 — notification for assignee (skip if self-assigned)
+      // Signal 2 — doc_events row so it appears in the CaseFile Timeline tab
+      supabase.from('doc_events').insert({
+        case_id:        caseId,
+        org_id:         orgId,
+        event_category: 'task',
+        doc_type:       'task_created',
+        source:         'task',
+        changed_fields: [],
+        summary:        `"${title.trim()}" · ${priority} priority${assigneeName ? ` → ${assigneeName}` : ''}`,
+        title:          title.trim(),
+        university_name: myName,      // reused as actor/created_by
+        actor_name:     myName,
+        metadata: {
+          created_by_name:  myName,
+          assigned_to_name: assigneeName || null,
+          priority,
+          due_date:         dueDate || null,
+          task_id:          newTask?.id || null,
+        },
+        confidence:     1.0,
+        created_at:     new Date().toISOString(),
+      }).then(({ error: e }) => { if (e) console.warn('[ChatThread] doc_events task insert error:', e); });
       if (assigneeId && assigneeId !== myId) {
         supabase.from('notifications').insert({
           recipient_id:    assigneeId,
@@ -817,7 +1308,6 @@ function TaskPopover({ msg, caseId, studentName, orgMembers, anchorRect, onClose
       }
 
       setSaved(true);
-      onCreated?.();
       setTimeout(() => onClose(), 900);
     }
   }
@@ -1064,25 +1554,13 @@ function TaskPopover({ msg, caseId, studentName, orgMembers, anchorRect, onClose
       )}
     </div>,
     document.body
-  {/* ── Task popover — portal-rendered ── */}
-      {taskTarget && (
-        <TaskPopover
-          msg={taskTarget.msg}
-          caseId={caseId}
-          studentName={studentName}
-          orgMembers={orgMembers}
-          anchorRect={taskTarget.anchorRect}
-          onClose={() => setTaskTarget(null)}
-          onCreated={() => setTaskTarget(null)}
-        />
-      )}
-    </div>
   );
 }
 
 /* ─── Individual message row ─────────────────────────────────────────── */
-function MessageRow({ msg, isMe, palette, grouped, reply, onReply, onDelete, onMakeTask }) {
+function MessageRow({ msg, isMe, palette, grouped, reply, onReply, onDelete, onMakeTask, onPin, onUnpin, isPinned }) {
   const [hover,       setHover]       = useState(false);
+  const [pinFeedback, setPinFeedback] = useState(false); // brief confirmation state
   const makeTaskRef   = useRef(null);
 
   return (
@@ -1139,7 +1617,8 @@ function MessageRow({ msg, isMe, palette, grouped, reply, onReply, onDelete, onM
               ? (isMe ? '8px 4px 4px 8px' : '4px 8px 8px 4px')
               : (isMe ? '8px 4px 8px 8px' : '4px 8px 8px 8px'),
           background: isMe ? 'var(--p)' : 'var(--s2)',
-          border: isMe ? 'none' : '1px solid var(--bd)',
+          border: isMe ? 'none' : `1px solid ${isPinned ? 'rgba(13,148,136,.35)' : 'var(--bd)'}`,
+          borderLeft: isPinned && !isMe ? '3px solid #0D9488' : undefined,
           color: isMe ? '#fff' : 'var(--t1)',
           fontSize: 13, fontFamily: 'var(--fu)', lineHeight: 1.5,
           wordBreak: 'break-word', whiteSpace: 'pre-wrap',
@@ -1176,12 +1655,12 @@ function MessageRow({ msg, isMe, palette, grouped, reply, onReply, onDelete, onM
           onClick={onReply}
           title="Reply"
           style={{
-            width: 24, height: 24, borderRadius: 5, border: 'none',
+            width: 28, height: 28, borderRadius: 6, border: 'none',
             background: 'var(--s3)', color: 'var(--t3)',
             cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
           }}
         >
-          <Reply size={11}/>
+          <Reply size={14}/>
         </button>
         <button
           ref={makeTaskRef}
@@ -1191,26 +1670,77 @@ function MessageRow({ msg, isMe, palette, grouped, reply, onReply, onDelete, onM
           }}
           title="Create task from this message"
           style={{
-            width: 24, height: 24, borderRadius: 5, border: 'none',
+            width: 28, height: 28, borderRadius: 6, border: 'none',
             background: 'var(--s3)', color: 'var(--t3)',
             cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
           }}
           onMouseEnter={e => { e.currentTarget.style.background = 'rgba(29,107,232,.15)'; e.currentTarget.style.color = 'var(--p)'; }}
           onMouseLeave={e => { e.currentTarget.style.background = 'var(--s3)'; e.currentTarget.style.color = 'var(--t3)'; }}
         >
-          <ClipboardList size={11}/>
+          <ClipboardList size={14}/>
+        </button>
+        <button
+          onClick={() => {
+            if (isPinned) {
+              onUnpin?.();
+            } else {
+              onPin?.();
+              setPinFeedback(true);
+              setTimeout(() => setPinFeedback(false), 1800);
+            }
+          }}
+          title={isPinned ? 'Unpin message' : 'Pin message'}
+          style={{
+            width: (isPinned || pinFeedback) ? 68 : 28,
+            height: 28, borderRadius: 6, border: 'none',
+            background: isPinned
+              ? 'rgba(13,148,136,.15)'
+              : pinFeedback
+                ? 'rgba(13,148,136,.15)'
+                : 'var(--s3)',
+            color: (isPinned || pinFeedback) ? '#0D9488' : 'var(--t3)',
+            cursor: 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 3,
+            transition: 'all .15s', overflow: 'hidden', whiteSpace: 'nowrap',
+            fontSize: 9, fontWeight: 700, fontFamily: 'var(--fu)',
+          }}
+          onMouseEnter={e => {
+            if (isPinned) {
+              e.currentTarget.style.background = 'rgba(220,38,38,.1)';
+              e.currentTarget.style.color = '#DC2626';
+            } else if (!pinFeedback) {
+              e.currentTarget.style.background = 'rgba(13,148,136,.15)';
+              e.currentTarget.style.color = '#0D9488';
+            }
+          }}
+          onMouseLeave={e => {
+            if (isPinned) {
+              e.currentTarget.style.background = 'rgba(13,148,136,.15)';
+              e.currentTarget.style.color = '#0D9488';
+            } else if (!pinFeedback) {
+              e.currentTarget.style.background = 'var(--s3)';
+              e.currentTarget.style.color = 'var(--t3)';
+            }
+          }}
+        >
+          {isPinned
+            ? <><PinOff size={11}/> Unpin</>
+            : pinFeedback
+              ? <><Check size={10}/> Pinned</>
+              : <Pin size={14}/>
+          }
         </button>
         {onDelete && (
           <button
             onClick={onDelete}
             title="Delete"
             style={{
-              width: 24, height: 24, borderRadius: 5, border: 'none',
+              width: 28, height: 28, borderRadius: 6, border: 'none',
               background: 'var(--s3)', color: 'var(--t3)',
               cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
             }}
           >
-            <Trash2 size={11}/>
+            <Trash2 size={14}/>
           </button>
         )}
       </div>
@@ -1218,14 +1748,59 @@ function MessageRow({ msg, isMe, palette, grouped, reply, onReply, onDelete, onM
   );
 }
 
-/* ─── Render message body with highlighted #tags and @mentions ───────── */
+/* ─── Render message body with highlighted #tags, @mentions, and task links ── */
+// Detects: #tags, @mentions, and task references like "task:", "TODO:", or
+// plain quoted task titles in backticks e.g. `Submit IELTS`
+const TASK_LINK_RE = /\b(task|todo|action item):\s*["']?([^"'\n]{3,60})["']?/gi;
+
 function renderMessageContent(text, isMe) {
-  const parts = text.split(/(#\w+|@[A-Za-z]+(?:\s[A-Za-z]+)?)/g);
+  // First pass: replace task link patterns with a placeholder token so we can
+  // split on tags/mentions without breaking multi-word task titles.
+  const taskMatches = [];
+  const withTokens = text.replace(TASK_LINK_RE, (match, _keyword, title) => {
+    const token = `\x00TASK${taskMatches.length}\x00`;
+    taskMatches.push({ token, title: title.trim(), match });
+    return token;
+  });
+
+  const parts = withTokens.split(/(#\w+|@[A-Za-z]+(?:\s[A-Za-z]+)?|\x00TASK\d+\x00)/g);
+
   return parts.map((part, i) => {
+    // Task link token
+    const taskIdx = taskMatches.findIndex(t => t.token === part);
+    if (taskIdx !== -1) {
+      const { title } = taskMatches[taskIdx];
+      return (
+        <span
+          key={i}
+          title={`Task reference: "${title}"`}
+          style={{
+            display: 'inline-flex', alignItems: 'center', gap: 3,
+            fontWeight: 700,
+            color: isMe ? 'rgba(255,255,255,.95)' : '#7C3AED',
+            background: isMe ? 'rgba(255,255,255,.18)' : 'rgba(124,58,237,.1)',
+            borderRadius: 4, padding: '0 5px',
+            fontSize: '0.95em', cursor: 'default',
+            border: isMe ? '1px solid rgba(255,255,255,.2)' : '1px solid rgba(124,58,237,.2)',
+          }}
+        >
+          <ClipboardList size={10}/>{title}
+        </span>
+      );
+    }
+    // #tag
     if (/^#\w+/.test(part))
       return <span key={i} style={{ fontWeight: 700, opacity: .85 }}>{part}</span>;
+    // @mention
     if (/^@/.test(part))
-      return <span key={i} style={{ fontWeight: 700, color: isMe ? 'rgba(255,255,255,.9)' : 'var(--p)', background: isMe ? 'rgba(255,255,255,.15)' : 'rgba(29,107,232,.1)', borderRadius: 3, padding: '0 3px' }}>{part}</span>;
+      return (
+        <span key={i} style={{
+          fontWeight: 700,
+          color: isMe ? 'rgba(255,255,255,.9)' : 'var(--p)',
+          background: isMe ? 'rgba(255,255,255,.15)' : 'rgba(29,107,232,.1)',
+          borderRadius: 3, padding: '0 3px',
+        }}>{part}</span>
+      );
     return part;
   });
 }

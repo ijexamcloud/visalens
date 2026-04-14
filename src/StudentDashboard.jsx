@@ -17,7 +17,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   AlertCircle, AlertTriangle, Bell, Check,
-  ChevronDown, ChevronRight, Clock, Eye,
+  ChevronDown, ChevronRight, Clock, Copy, Eye,
   LayoutDashboard, Loader2, RefreshCw, Search, List,
   Target, TrendingUp, User, X, Zap, ExternalLink,
   MapPin, Calendar, Activity, Phone, Mail,
@@ -1234,6 +1234,11 @@ function AutoDetectBanner({ caseObj, onConfirm, onDismiss }) {
 }
 
 function QuickPeekDrawer({ student, onClose, onOpenFull, onOpenMatcher, onStatusChange, onNoteUpdate, onPaymentUpdate, savingId, policyAlerts, inboxAlerts=[], openDocsTab=false, counsellorOptions=[], onOpenChat, onSuggestionConfirm, onSuggestionDismiss, openChatCount=0 }) {
+  const [closing, setClosing] = React.useState(false);
+  function slideClose(cb) {
+    setClosing(true);
+    setTimeout(() => { setClosing(false); cb?.(); onClose(); }, 220);
+  }
   const [contact,    setContact]    = useState({ phone: '', email: '' });
   const [logText,    setLogText]    = useState('');
   const [logSaving,  setLogSaving]  = useState(false);
@@ -1417,8 +1422,8 @@ function QuickPeekDrawer({ student, onClose, onOpenFull, onOpenMatcher, onStatus
 
   return (
     <>
-      <div onClick={onClose} style={{ position:'fixed', inset:0, zIndex:300, background:'rgba(15,30,60,.25)', backdropFilter:'blur(2px)', animation:'sdb-fade-in .15s ease' }}/>
-      <div style={{ position:'fixed', top:0, right:0, bottom:0, width:'min(440px,92vw)', zIndex:301, background:'var(--s1)', borderLeft:'1px solid var(--bd)', boxShadow:'var(--sh3)', display:'flex', flexDirection:'column', animation:'sdb-slide-in-right .2s var(--eout)' }}>
+      <div onClick={() => slideClose()} style={{ position:'fixed', inset:0, zIndex:300, background:'rgba(15,30,60,.25)', backdropFilter:'blur(2px)', animation:'sdb-fade-in .15s ease' }}/>
+      <div style={{ position:'fixed', top:0, right:0, bottom:0, width:'min(440px,92vw)', zIndex:301, background:'var(--s1)', borderLeft:'1px solid var(--bd)', boxShadow:'var(--sh3)', display:'flex', flexDirection:'column', animation:closing?'sdb-slide-out-right .2s var(--eout) forwards':'sdb-slide-in-right .2s var(--eout)' }}>
 
         <div style={{ padding:'18px 20px 14px', borderBottom:'1px solid var(--bd)', background:'var(--s2)', display:'flex', alignItems:'flex-start', gap:12, flexShrink:0 }}>
           <Avatar name={student.studentName} size={44}/>
@@ -1479,7 +1484,7 @@ function QuickPeekDrawer({ student, onClose, onOpenFull, onOpenMatcher, onStatus
                 <MessageSquare size={14}/> Chat
               </button>
               <button
-                onClick={() => { onOpenFull(student); onClose(); }}
+                onClick={() => slideClose(() => onOpenFull(student))}
                 style={{
                   padding:'8px 12px', borderRadius:8,
                   border:'1px solid var(--bd)', background:'var(--s1)',
@@ -1610,7 +1615,7 @@ function QuickPeekDrawer({ student, onClose, onOpenFull, onOpenMatcher, onStatus
 
         <div style={{ flex:1, overflowY: activeTab === 'tasks' ? 'hidden' : 'auto', padding:'0 0 8px', display: activeTab === 'tasks' ? 'flex' : 'block', flexDirection:'column' }}>
           {activeTab === 'tasks' ? (
-            <CaseTasks caseId={student.id} orgCounsellors={counsellorOptions}/>
+            <CaseTasks caseId={student.id} orgCounsellors={counsellorOptions} studentName={student.studentName}/>
           ) : activeTab === 'docs' ? (
             <DocChecklist student={student}/>
           ) : activeTab === 'info' ? (<>
@@ -2115,6 +2120,7 @@ function QuickPeekDrawer({ student, onClose, onOpenFull, onOpenMatcher, onStatus
           caseData={student}
           counsellorOptions={counsellorOptions}
           onClose={()=>setShowCaseFile(false)}
+          onOpenFull={(c) => { setShowCaseFile(false); slideClose(() => onOpenFull(c || student)); }}
         />
       )}
     </>
@@ -2173,6 +2179,12 @@ function ChatThreadInline({ caseId, studentName }) {
   const [replyTo,     setReplyTo]     = useState(null);
   const [searchText,  setSearchText]  = useState('');
   const [searchOpen,  setSearchOpen]  = useState(false);
+  const [summarizing,  setSummarizing]  = useState(false);
+  const [summaryCard,  setSummaryCard]  = useState(null);
+  const [summaryOpen,  setSummaryOpen]  = useState(false);
+  const [summaryCopied,     setSummaryCopied]     = useState(false);
+  const [summaryNoteSaving, setSummaryNoteSaving] = useState(false);
+  const [summaryNoteSaved,  setSummaryNoteSaved]  = useState(false);
 
   // ── @mention state ────────────────────────────────────────────────────
   // orgMembers: [{id, full_name}] fetched once per org, shared via module-level cache
@@ -2356,6 +2368,59 @@ function ChatThreadInline({ caseId, studentName }) {
     }, 0);
   }
 
+  /* ── AI Summary ─────────────────────────────────────────────────── */
+  async function summarizeChat() {
+    if (!caseId || !session?.org_id || summarizing) return;
+    setSummarizing(true);
+    try {
+      const { data: chatMsgs, error } = await supabase
+        .from('chat_messages')
+        .select('sender_name, content, created_at')
+        .eq('case_id', caseId)
+        .eq('org_id', session.org_id)
+        .eq('is_deleted', false)
+        .neq('is_system', true)
+        .order('created_at', { ascending: false })
+        .limit(50);
+      if (error) throw new Error(error.message);
+      if (!chatMsgs || chatMsgs.length === 0) {
+        setSummaryCard({ text: 'No messages to summarize yet.' });
+        setSummaryOpen(true);
+        return;
+      }
+      const lines = [...chatMsgs].reverse().map(m => `[${m.sender_name}]: ${m.content}`).join('\n');
+      const { data: { session: authSess } } = await supabase.auth.getSession();
+      const token = authSess?.access_token || session.access_token || '';
+      const resp = await fetch(PROXY_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({
+          org_id: session.org_id,
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 400,
+          system: 'You are summarizing a visa case team chat. Extract: key decisions made, pending actions, who is responsible for what, any deadlines mentioned. Be concise — max 150 words. Format with short bullet points grouped under bold headings: **Decisions**, **Pending Actions**, **Deadlines**. Omit any heading that has nothing to report.',
+          messages: [{ role: 'user', content: `Summarize this team chat:\n\n${lines}` }],
+        }),
+      });
+      const data = await resp.json();
+      if (data.error) throw new Error(data.error.message || 'API error');
+      const summaryText = data.content?.map(b => b.text || '').join('') || '(no summary)';
+      setSummaryCard({ text: summaryText });
+      setSummaryOpen(true);
+      await supabase.from('chat_messages').insert({
+        case_id: caseId, org_id: session.org_id,
+        sender_id: myId, sender_name: myName, sender_color: '#6B7280',
+        content: `📋 AI Chat Summary\n\n${summaryText}`,
+        tags: [], attachments: [], is_deleted: false, is_system: true, type: 'ai_summary',
+      });
+    } catch (e) {
+      setSummaryCard({ text: `⚠️ Could not summarize: ${e.message}` });
+      setSummaryOpen(true);
+    } finally {
+      setSummarizing(false);
+    }
+  }
+
   const displayMessages = useMemo(()=>{
     if(!searchText) return messages;
     const lc=searchText.toLowerCase();
@@ -2363,23 +2428,119 @@ function ChatThreadInline({ caseId, studentName }) {
   },[messages,searchText]);
 
   return (
-    <div style={{display:'flex',flexDirection:'column',height:'100%',background:'var(--s1)'}}>
-      {/* Search bar */}
-      <div style={{display:'flex',alignItems:'center',gap:6,padding:'6px 10px',borderBottom:'1px solid var(--bd)',background:'var(--s2)',flexShrink:0}}>
+    <div style={{display:'flex',flexDirection:'column',height:'100%',background:'var(--s1)',position:'relative'}}>
+      {/* ── Toolbar ── */}
+      <div style={{display:'flex',alignItems:'center',gap:5,padding:'6px 10px',borderBottom:'1px solid var(--bd)',background:'var(--s2)',flexShrink:0}}>
+        <span style={{flex:1,fontSize:10,color:'var(--t3)',fontFamily:'var(--fu)'}}>
+          {messages.filter(m=>!m.is_deleted).length} messages
+        </span>
         <button onClick={()=>{setSearchOpen(o=>!o);setTimeout(()=>searchRef.current?.focus(),50);}}
-          style={{width:26,height:26,borderRadius:5,border:'none',background:searchOpen?'var(--p)':'var(--s3)',color:searchOpen?'#fff':'var(--t3)',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}>
+          style={{width:26,height:26,borderRadius:5,border:'none',background:searchOpen?'var(--p)':'var(--s3)',color:searchOpen?'#fff':'var(--t3)',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}
+          title="Search messages">
           <Search size={12}/>
         </button>
-        {searchOpen&&(
+        <button
+          onClick={summarizeChat}
+          disabled={summarizing}
+          title="AI Summary — summarize this team chat"
+          style={{
+            width:26,height:26,borderRadius:5,border:'none',
+            background:summarizing?'var(--s3)':'rgba(124,58,237,.12)',
+            color:summarizing?'var(--t3)':'#7C3AED',
+            cursor:summarizing?'default':'pointer',
+            display:'flex',alignItems:'center',justifyContent:'center',
+            transition:'background .15s',flexShrink:0,
+          }}
+          onMouseEnter={e=>{if(!summarizing) e.currentTarget.style.background='rgba(124,58,237,.22)';}}
+          onMouseLeave={e=>{if(!summarizing) e.currentTarget.style.background='rgba(124,58,237,.12)';}}
+        >
+          {summarizing
+            ? <Loader2 size={11} style={{animation:'spin .7s linear infinite'}}/>
+            : <Sparkles size={12}/>
+          }
+        </button>
+      </div>
+
+      {/* ── Search bar (conditional) ── */}
+      {searchOpen&&(
+        <div style={{display:'flex',alignItems:'center',gap:6,padding:'5px 10px',borderBottom:'1px solid var(--bd)',background:'var(--s2)',flexShrink:0}}>
+          <Search size={11} color="var(--t3)"/>
           <input ref={searchRef} value={searchText} onChange={e=>setSearchText(e.target.value)}
             placeholder="Search messages…"
             style={{flex:1,border:'none',background:'transparent',fontSize:12,fontFamily:'var(--fu)',color:'var(--t1)',outline:'none'}}/>
-        )}
-        {searchText&&<button onClick={()=>setSearchText('')} style={{border:'none',background:'none',cursor:'pointer',color:'var(--t3)',padding:0}}><X size={11}/></button>}
-        {!searchOpen&&<span style={{flex:1,fontSize:10,color:'var(--t3)',fontFamily:'var(--fu)'}}>
-          {messages.filter(m=>!m.is_deleted).length} messages
-        </span>}
-      </div>
+          {searchText&&<button onClick={()=>setSearchText('')} style={{border:'none',background:'none',cursor:'pointer',color:'var(--t3)',padding:0}}><X size={11}/></button>}
+        </div>
+      )}
+
+      {/* ── AI Summary overlay ── */}
+      {summaryCard&&summaryOpen&&(
+        <div style={{position:'absolute',inset:0,zIndex:400,display:'flex',flexDirection:'column',background:'var(--s1)',animation:'sd-slide-up .18s ease'}}>
+          <style>{`@keyframes sd-slide-up{from{transform:translateY(10px);opacity:0}to{transform:translateY(0);opacity:1}}`}</style>
+          <div style={{display:'flex',alignItems:'center',gap:8,padding:'10px 12px',borderBottom:'1px solid var(--bd)',background:'var(--s2)',flexShrink:0}}>
+            <div style={{width:28,height:28,borderRadius:7,background:'rgba(124,58,237,.12)',border:'1px solid rgba(124,58,237,.2)',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+              <Sparkles size={14} color="#7C3AED"/>
+            </div>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:12,fontWeight:700,color:'var(--t1)',fontFamily:'var(--fh)'}}>AI Chat Summary</div>
+              <div style={{fontSize:10,color:'var(--t3)',fontFamily:'var(--fu)'}}>{studentName}</div>
+            </div>
+            <button onClick={()=>setSummaryOpen(false)} style={{width:26,height:26,borderRadius:5,border:'none',background:'var(--s3)',color:'var(--t2)',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+              <X size={12}/>
+            </button>
+          </div>
+          <div style={{flex:1,overflowY:'auto',padding:'14px'}}>
+            {summaryCard.text.split('\n').map((line,i)=>{
+              if(/^\*\*(.+)\*\*$/.test(line)) return (
+                <div key={i} style={{display:'flex',alignItems:'center',gap:6,marginTop:i>0?14:0,marginBottom:5}}>
+                  <div style={{width:3,height:13,borderRadius:2,background:'#7C3AED',flexShrink:0}}/>
+                  <span style={{fontSize:10,fontWeight:800,color:'#7C3AED',fontFamily:'var(--fh)',textTransform:'uppercase',letterSpacing:'.07em'}}>{line.replace(/\*\*/g,'')}</span>
+                </div>
+              );
+              if(line.startsWith('• ')||line.startsWith('- ')) return (
+                <div key={i} style={{display:'flex',gap:7,marginTop:5,paddingLeft:9}}>
+                  <span style={{color:'#7C3AED',flexShrink:0,fontSize:14,lineHeight:1,marginTop:1}}>·</span>
+                  <span style={{fontSize:12,color:'var(--t1)',fontFamily:'var(--fu)',lineHeight:1.6}}>{line.slice(2)}</span>
+                </div>
+              );
+              return line?<div key={i} style={{fontSize:12,color:'var(--t2)',fontFamily:'var(--fu)',lineHeight:1.6,marginTop:3}}>{line}</div>:null;
+            })}
+          </div>
+          <div style={{display:'flex',gap:6,padding:'10px 12px',borderTop:'1px solid var(--bd)',background:'var(--s2)',flexShrink:0}}>
+            <button
+              onClick={()=>{ navigator.clipboard?.writeText(summaryCard.text).catch(()=>{}); setSummaryCopied(true); setTimeout(()=>setSummaryCopied(false),1800); }}
+              style={{display:'flex',alignItems:'center',gap:5,padding:'0 11px',height:30,borderRadius:6,border:'none',background:summaryCopied?'rgba(5,150,105,.12)':'rgba(124,58,237,.1)',color:summaryCopied?'#059669':'#7C3AED',fontSize:10,fontWeight:700,fontFamily:'var(--fu)',cursor:'pointer',transition:'all .15s',whiteSpace:'nowrap'}}
+            >
+              {summaryCopied ? <Check size={11}/> : <Copy size={11}/>}
+              {summaryCopied ? 'Copied!' : 'Copy'}
+            </button>
+            <button
+              onClick={async()=>{
+                if(summaryNoteSaved||summaryNoteSaving) return;
+                setSummaryNoteSaving(true);
+                try{
+                  await supabase.from('doc_events').insert({
+                    case_id:caseId, org_id:session.org_id,
+                    event_category:'note', doc_type:'ai_summary',
+                    source:'ai_chat_summary', changed_fields:[],
+                    summary:`AI Chat Summary\n\n${summaryCard.text}`,
+                    university_name:myName, confidence:1.0,
+                    created_at:new Date().toISOString(),
+                  });
+                  setSummaryNoteSaved(true); setTimeout(()=>setSummaryNoteSaved(false),2500);
+                }catch(e){console.error('[summary] save note:',e);}
+                finally{setSummaryNoteSaving(false);}
+              }}
+              style={{display:'flex',alignItems:'center',gap:5,padding:'0 11px',height:30,borderRadius:6,border:'none',background:summaryNoteSaved?'rgba(5,150,105,.12)':'rgba(124,58,237,.1)',color:summaryNoteSaved?'#059669':'#7C3AED',fontSize:10,fontWeight:700,fontFamily:'var(--fu)',cursor:summaryNoteSaving||summaryNoteSaved?'default':'pointer',transition:'all .15s',whiteSpace:'nowrap'}}
+            >
+              {summaryNoteSaving?<Loader2 size={10} style={{animation:'spin .7s linear infinite'}}/>:summaryNoteSaved?<Check size={11}/>:<FileText size={11}/>}
+              {summaryNoteSaved?'Saved to Timeline!':summaryNoteSaving?'Saving…':'Save as Note'}
+            </button>
+            <button onClick={()=>setSummaryOpen(false)} style={{marginLeft:'auto',padding:'0 10px',height:30,borderRadius:6,border:'1px solid var(--bd)',background:'transparent',color:'var(--t3)',fontSize:10,fontFamily:'var(--fu)',cursor:'pointer'}}>
+              Back to chat
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Messages */}
       <div style={{flex:1,overflowY:'auto',padding:'10px 10px',display:'flex',flexDirection:'column',gap:2}}>
@@ -2701,6 +2862,9 @@ export default function StudentDashboard({ onLoad, onOpenMatcher, totalCases: to
 
   // Notify parent when peek drawer opens/closes so chat tray can shift
   useEffect(() => { onPeekChange?.(!!peekStudent); }, [peekStudent]);
+
+  // Wrapper: close peek drawer before opening the full case view
+  function handleOpenFull(c) { setPeekStudent(null); setPeekDocsTab(false); onLoad(c); }
   const [selectedIds, setSelectedIds] = useState(new Set());
 
   const [nameSearch,       setNameSearch]       = useState('');
@@ -3158,16 +3322,20 @@ const filtered = useMemo(()=>cases.filter(c=>{
     try {
       const s = getOrgSession();
       if (s?.org_id) {
-        const today = new Date().toISOString().slice(0, 10);
-        const { data: tasks } = await supabase
-          .from('case_tasks')
-          .select('id, title, due_date, priority, assigned_to_name, case_id')
-          .eq('org_id', s.org_id)
-          .neq('status', 'done')
-          .lt('due_date', today)
-          .order('due_date', { ascending: true })
-          .limit(20);
-        overdueTasks = tasks || [];
+        // Wait for auth session to be ready before querying RLS-protected tables
+        const { data: { session: authSession } } = await supabase.auth.getSession();
+        if (authSession) {
+          const today = new Date().toISOString().slice(0, 10);
+          const { data: tasks } = await supabase
+            .from('case_tasks')
+            .select('id, title, due_date, priority, assigned_to_name, case_id')
+            .eq('org_id', s.org_id)
+            .neq('status', 'done')
+            .lt('due_date', today)
+            .order('due_date', { ascending: true })
+            .limit(20);
+          overdueTasks = tasks || [];
+        }
       }
     } catch { /* non-critical — brief still generates without tasks */ }
 
@@ -3414,7 +3582,8 @@ const filtered = useMemo(()=>cases.filter(c=>{
     <>
       <style>{`
         @keyframes sdb-fade-in        { from{opacity:0} to{opacity:1} }
-        @keyframes sdb-slide-in-right { from{transform:translateX(100%)} to{transform:translateX(0)} }
+        @keyframes sdb-slide-in-right  { from{transform:translateX(100%)} to{transform:translateX(0)} }
+        @keyframes sdb-slide-out-right { from{transform:translateX(0)} to{transform:translateX(100%)} }
         @keyframes sdb-shimmer        { 0%,100%{background-color:var(--s3)} 50%{background-color:var(--s2)} }
         /* Optional: Hide scrollbar for cleaner sticky sidebar on webkit */
         .sdb-sticky-sidebar::-webkit-scrollbar { display: none; }
@@ -3425,7 +3594,7 @@ const filtered = useMemo(()=>cases.filter(c=>{
         <QuickPeekDrawer 
           student={cases.find(c => c.id === peekStudent.id) || peekStudent} 
           onClose={()=>{ setPeekStudent(null); setPeekDocsTab(false); }} 
-          onOpenFull={onLoad} 
+          onOpenFull={handleOpenFull} 
           onOpenMatcher={onOpenMatcher}
           onStatusChange={handleStatusChange} 
           onNoteUpdate={handleNoteUpdate} 
@@ -3760,11 +3929,11 @@ const filtered = useMemo(()=>cases.filter(c=>{
 
             {/* Board / List / Radar */}
             {viewMode==='board' ? (
-              <KanbanBoard cases={filtered} alertCountries={alertCountries} savingId={savingId} onStatusChange={handleStatusChange} onPeek={setPeekStudent} onOpenChat={onOpenChat} onLoad={onLoad}/>
+              <KanbanBoard cases={filtered} alertCountries={alertCountries} savingId={savingId} onStatusChange={handleStatusChange} onPeek={setPeekStudent} onOpenChat={onOpenChat} onLoad={handleOpenFull}/>
             ) : viewMode==='radar' ? (
               <RadarMatrix
                 cases={filtered}
-                onOpenCase={onLoad}
+                onOpenCase={handleOpenFull}
                 callGeminiInsight={callGeminiInsight}
                 externalInsightCache={_geminiInsightCache}
                 previousQuadrants={previousQuadrants}
@@ -3803,7 +3972,7 @@ const filtered = useMemo(()=>cases.filter(c=>{
                   return (
                     <div key={c.id} className="sdb-row"
                       style={{ borderLeft:stale?'3px solid rgba(180,83,9,.45)':days!==null&&days<=14?'3px solid rgba(220,38,38,.45)':'3px solid transparent', background:selected?'rgba(29,107,232,.04)':undefined, cursor:'pointer' }}
-                      onClick={()=>onLoad(c)}
+                      onClick={()=>handleOpenFull(c)}
                     >
                       <div onClick={e=>{e.stopPropagation();toggleSelect(c.id);}} style={{ display:'flex', alignItems:'center', justifyContent:'center', cursor:'pointer', flexShrink:0 }}>
                         {selected?<CheckSquare size={14} color="var(--p)"/>:<Square size={14} color="var(--t3)" style={{ opacity:.35 }}/>}

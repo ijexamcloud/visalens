@@ -1,330 +1,352 @@
-table_name,column_name,data_type,is_nullable
-alert_log,id,uuid,NO
-alert_log,case_id,uuid,NO
-alert_log,org_id,uuid,NO
-alert_log,alert_type,text,NO
-alert_log,sent_at,timestamp with time zone,NO
-alert_log,sent_week,date,NO
-alert_log,sent_to,text,NO
-alert_log,expiry_date,date,NO
-alert_log,expiry_doc_type,text,NO
-audit_log,id,uuid,NO
-audit_log,org_id,uuid,YES
-audit_log,branch_id,uuid,YES
-audit_log,member_id,uuid,YES
-audit_log,action,text,NO
-audit_log,entity_type,text,YES
-audit_log,entity_id,text,YES
-audit_log,metadata,jsonb,YES
-audit_log,created_at,timestamp with time zone,YES
-audit_log,action_type,text,YES
-audit_log,counsellor_id,text,YES
-audit_log,counsellor_name,text,YES
-audit_log,case_id,uuid,YES
-audit_log,case_quadrant,text,YES
-branch_credit_pools,id,uuid,NO
-branch_credit_pools,org_id,uuid,NO
-branch_credit_pools,branch_id,uuid,NO
-branch_credit_pools,allocated,integer,NO
-branch_credit_pools,updated_at,timestamp with time zone,YES
-branches,id,uuid,NO
-branches,org_id,uuid,NO
-branches,name,text,NO
-branches,city,text,YES
-branches,is_active,boolean,NO
-branches,created_at,timestamp with time zone,YES
-case_serial_seq,org_id,uuid,NO
-case_serial_seq,seq_date,date,NO
-case_serial_seq,seq,integer,NO
-case_snapshots,id,uuid,NO
-case_snapshots,case_id,uuid,NO
-case_snapshots,org_id,uuid,NO
-case_snapshots,counsellor_name,text,YES
-case_snapshots,funnel_stage,text,YES
-case_snapshots,lead_status,text,YES
-case_snapshots,quadrant,text,YES
-case_snapshots,doc_score,integer,YES
-case_snapshots,viability_score,integer,YES
-case_snapshots,viability_confidence,numeric,YES
-case_snapshots,scoring_version,integer,NO
-case_snapshots,snapshot_date,date,NO
-case_snapshots,student_metadata,jsonb,YES
-case_snapshots,created_at,timestamp with time zone,YES
-case_tasks,id,uuid,NO
-case_tasks,case_id,uuid,NO
-case_tasks,org_id,uuid,NO
-case_tasks,title,text,NO
-case_tasks,priority,text,NO
-case_tasks,assigned_to_id,uuid,YES
-case_tasks,assigned_to_name,text,YES
-case_tasks,created_by_id,uuid,NO
-case_tasks,created_by_name,text,NO
-case_tasks,due_date,date,YES
-case_tasks,status,text,NO
-case_tasks,completed_at,timestamp with time zone,YES
-case_tasks,completed_by_id,uuid,YES
-case_tasks,completed_by_name,text,YES
-case_tasks,created_at,timestamp with time zone,NO
-case_tasks,updated_at,timestamp with time zone,NO
-cases,id,uuid,NO
-cases,org_id,uuid,NO
-cases,created_at,timestamp with time zone,YES
-cases,updated_at,timestamp with time zone,YES
-cases,student_name,text,YES
-cases,profile_data,jsonb,YES
-cases,results,jsonb,YES
-cases,doc_list,jsonb,YES
-cases,notes,text,YES
-cases,preferred_offer_index,integer,YES
-cases,counsellor_name,text,YES
-cases,overall_score,integer,YES
-cases,target_country,text,YES
-cases,sop_text,text,YES
-cases,university_sop,text,YES
-cases,visa_sop,text,YES
-cases,resume_text,text,YES
-cases,case_serial,text,YES
-cases,programme,text,YES
-cases,application_targets,jsonb,YES
-cases,lead_status,text,YES
-cases,expiry_date,date,YES
-cases,expiry_doc_type,text,YES
-cases,counsellor_email,text,YES
-cases,student_email,text,YES
-cases,branch_id,uuid,YES
-cases,created_by,uuid,YES
-cases,assigned_to,uuid,YES
-cases,status_updated_at,timestamp with time zone,YES
-cases,referral_source,text,YES
-cases,payment_status,text,YES
-cases,pending_status_suggestion,text,YES
-cases,pipeline_stage,text,YES
-cases,score_data,jsonb,YES
-chat_messages,id,uuid,NO
-chat_messages,case_id,uuid,NO
-chat_messages,org_id,uuid,NO
-chat_messages,sender_id,uuid,NO
-chat_messages,sender_name,text,NO
-chat_messages,sender_color,text,NO
-chat_messages,content,text,NO
-chat_messages,tags,ARRAY,YES
-chat_messages,reply_to_id,uuid,YES
-chat_messages,attachments,jsonb,YES
-chat_messages,mentioned_ids,ARRAY,YES
-chat_messages,is_deleted,boolean,NO
-chat_messages,deleted_at,timestamp with time zone,YES
-chat_messages,deleted_by_id,uuid,YES
-chat_messages,edited_at,timestamp with time zone,YES
-chat_messages,created_at,timestamp with time zone,NO
-chat_reads,id,uuid,NO
-chat_reads,case_id,uuid,NO
-chat_reads,org_id,uuid,NO
-chat_reads,member_id,uuid,NO
-chat_reads,member_name,text,NO
-chat_reads,last_read_at,timestamp with time zone,NO
-chat_reads,granted_access,boolean,YES
-credit_transactions,id,uuid,NO
-credit_transactions,org_id,uuid,NO
-credit_transactions,branch_id,uuid,YES
-credit_transactions,member_id,uuid,YES
-credit_transactions,delta,integer,NO
-credit_transactions,reason,text,YES
-credit_transactions,created_at,timestamp with time zone,YES
-daily_counselor_stats,id,uuid,NO
-daily_counselor_stats,org_id,uuid,NO
-daily_counselor_stats,counsellor_name,text,NO
-daily_counselor_stats,stat_date,date,NO
-daily_counselor_stats,actions_vip,integer,YES
-daily_counselor_stats,actions_sales,integer,YES
-daily_counselor_stats,actions_drainers,integer,YES
-daily_counselor_stats,actions_dead,integer,YES
-daily_counselor_stats,actions_total,integer,YES
-daily_counselor_stats,stage_changes,integer,YES
-daily_counselor_stats,docs_uploaded,integer,YES
-daily_counselor_stats,emails_sent,integer,YES
-doc_events,id,uuid,NO
-doc_events,org_id,uuid,NO
-doc_events,case_id,uuid,NO
-doc_events,doc_type,text,NO
-doc_events,source,text,NO
-doc_events,changed_fields,ARRAY,NO
-doc_events,university_name,text,YES
-doc_events,summary,text,YES
-doc_events,confidence,numeric,YES
-doc_events,created_at,timestamp with time zone,NO
-funnel_stage_entries,id,uuid,NO
-funnel_stage_entries,case_id,uuid,NO
-funnel_stage_entries,org_id,uuid,NO
-funnel_stage_entries,funnel_stage,text,NO
-funnel_stage_entries,entered_stage_at,timestamp with time zone,NO
-funnel_stage_entries,exited_stage_at,timestamp with time zone,YES
-funnel_stage_entries,days_in_stage,integer,YES
-funnel_stage_entries,sla_breached,boolean,NO
-funnel_stage_entries,counsellor_name,text,YES
-inbox_alerts,id,uuid,NO
-inbox_alerts,org_id,uuid,NO
-inbox_alerts,case_id,uuid,NO
-inbox_alerts,inbox_event_id,uuid,YES
-inbox_alerts,event_type,text,NO
-inbox_alerts,university_name,text,YES
-inbox_alerts,due_date,date,YES
-inbox_alerts,is_urgent,boolean,NO
-inbox_alerts,confidence,numeric,YES
-inbox_alerts,summary,text,YES
-inbox_alerts,subject,text,YES
-inbox_alerts,sender_email,text,YES
-inbox_alerts,is_read,boolean,NO
-inbox_alerts,created_at,timestamp with time zone,YES
-inbox_events,id,uuid,NO
-inbox_events,org_id,uuid,NO
-inbox_events,case_id,uuid,NO
-inbox_events,gmail_msg_id,text,YES
-inbox_events,subject,text,YES
-inbox_events,sender_email,text,YES
-inbox_events,sender_domain,text,YES
-inbox_events,body_snippet,text,YES
-inbox_events,received_at,timestamp with time zone,YES
-inbox_events,created_at,timestamp with time zone,YES
-inbox_events,email_msg_id,text,YES
-inbox_sources,id,uuid,NO
-inbox_sources,org_id,uuid,NO
-inbox_sources,case_id,uuid,NO
-inbox_sources,forward_address,text,NO
-inbox_sources,source_type,text,NO
-inbox_sources,created_by,uuid,YES
-inbox_sources,created_at,timestamp with time zone,YES
-interview_sessions,id,uuid,NO
-interview_sessions,org_id,uuid,NO
-interview_sessions,case_id,uuid,NO
-interview_sessions,created_by,uuid,YES
-interview_sessions,mode,text,NO
-interview_sessions,question_bank,jsonb,NO
-interview_sessions,transcript,jsonb,NO
-interview_sessions,scores,jsonb,YES
-interview_sessions,recording_key,text,YES
-interview_sessions,status,text,NO
-interview_sessions,created_at,timestamp with time zone,YES
-interview_sessions,completed_at,timestamp with time zone,YES
-org_dashboard,id,uuid,YES
-org_dashboard,name,text,YES
-org_dashboard,email,text,YES
-org_dashboard,plan,text,YES
-org_dashboard,analyses_remaining,integer,YES
-org_dashboard,analyses_total,integer,YES
-org_dashboard,is_active,boolean,YES
-org_dashboard,access_code,text,YES
-org_dashboard,created_at,timestamp with time zone,YES
-org_dashboard,last_used_at,timestamp with time zone,YES
-org_dashboard,calls_today,bigint,YES
-org_dashboard,calls_this_month,bigint,YES
-org_dashboard,total_calls,bigint,YES
-org_dashboard,total_tokens,bigint,YES
-org_dashboard,total_cache_read,bigint,YES
-org_dashboard,total_cache_write,bigint,YES
-org_dashboard,total_cases,bigint,YES
-organizations,id,uuid,NO
-organizations,name,text,NO
-organizations,email,text,NO
-organizations,plan,text,NO
-organizations,analyses_remaining,integer,NO
-organizations,analyses_total,integer,NO
-organizations,is_active,boolean,NO
-organizations,access_code,text,YES
-organizations,notes,text,YES
-organizations,created_at,timestamp with time zone,NO
-organizations,last_used_at,timestamp with time zone,YES
-organizations,billing_cycle_start,date,YES
-organizations,credits_expiry_date,date,YES
-organizations,requirements_csv,text,YES
-organizations,sla_lead,integer,YES
-organizations,sla_docs_pending,integer,YES
-organizations,sla_ready_to_apply,integer,YES
-organizations,sla_applied,integer,YES
-organizations,sla_visa_prep,integer,YES
-organizations,viability_confidence_threshold,numeric,YES
-policy_alerts,id,uuid,NO
-policy_alerts,created_at,timestamp with time zone,YES
-policy_alerts,updated_at,timestamp with time zone,YES
-policy_alerts,country,text,YES
-policy_alerts,title,text,NO
-policy_alerts,detail,text,NO
-policy_alerts,source_url,text,YES
-policy_alerts,severity,text,NO
-policy_alerts,effective_date,date,YES
-policy_alerts,verified_at,date,NO
-policy_alerts,affected_if,jsonb,YES
-policy_alerts,status,text,NO
-policy_alerts,source,text,YES
-policy_alerts,raw_source_text,text,YES
-policy_alerts,is_active,boolean,YES
-policy_alerts,org_id,uuid,YES
-policy_alerts,affected_countries,ARRAY,NO
-policy_alerts,created_by,text,NO
-policy_alerts,expires_at,timestamp with time zone,YES
-profiles,id,uuid,NO
-profiles,org_id,uuid,NO
-profiles,role,text,NO
-profiles,full_name,text,YES
-profiles,is_active,boolean,NO
-profiles,created_at,timestamp with time zone,YES
-profiles,email,text,YES
-profiles,branch_id,uuid,YES
-profiles,status,text,NO
-profiles,credit_quota,integer,YES
-profiles,invited_by,uuid,YES
-profiles,invite_token,text,YES
-profiles,last_active,timestamp with time zone,YES
-profiles,updated_at,timestamp with time zone,YES
-profiles,restricted_tabs,jsonb,YES
-public_interview_links,id,uuid,NO
-public_interview_links,token,uuid,NO
-public_interview_links,org_id,uuid,NO
-public_interview_links,case_id,uuid,NO
-public_interview_links,created_by,uuid,YES
-public_interview_links,expires_at,timestamp with time zone,NO
-public_interview_links,is_active,boolean,YES
-public_interview_links,case_data,jsonb,NO
-public_interview_links,created_at,timestamp with time zone,YES
-public_interview_sessions,id,uuid,NO
-public_interview_sessions,token,uuid,NO
-public_interview_sessions,org_id,uuid,NO
-public_interview_sessions,case_id,uuid,NO
-public_interview_sessions,mode,text,NO
-public_interview_sessions,question_bank,jsonb,NO
-public_interview_sessions,transcript,jsonb,YES
-public_interview_sessions,status,text,NO
-public_interview_sessions,created_at,timestamp with time zone,YES
-public_interview_sessions,completed_at,timestamp with time zone,YES
-student_inboxes,id,uuid,NO
-student_inboxes,org_id,uuid,NO
-student_inboxes,case_id,uuid,NO
-student_inboxes,connected_by,uuid,YES
-student_inboxes,student_email,text,NO
-student_inboxes,provider,text,NO
-student_inboxes,refresh_token,text,YES
-student_inboxes,status,text,NO
-student_inboxes,last_synced_at,timestamp with time zone,YES
-student_inboxes,created_at,timestamp with time zone,YES
-student_shortlists,id,uuid,NO
-student_shortlists,org_id,uuid,NO
-student_shortlists,student_key,text,NO
-student_shortlists,match_keys,jsonb,NO
-student_shortlists,updated_at,timestamp with time zone,YES
-student_shortlists,chat_history,jsonb,NO
-usage_log,id,bigint,NO
-usage_log,org_id,uuid,YES
-usage_log,model,text,YES
-usage_log,input_tokens,integer,YES
-usage_log,output_tokens,integer,YES
-usage_log,analyses_used,integer,YES
-usage_log,endpoint,text,YES
-usage_log,created_at,timestamp with time zone,NO
-usage_log,cache_read,integer,YES
-usage_log,cache_write,integer,YES
-usage_log,case_id,uuid,YES
-visa_rules,id,uuid,NO
-visa_rules,country,text,NO
-visa_rules,visa_type,text,NO
-visa_rules,required_fields,jsonb,NO
-visa_rules,recommended_fields,jsonb,NO
-visa_rules,created_at,timestamp with time zone,YES
+table_name,column_name,data_type,is_nullable,column_default
+alert_log,id,uuid,NO,gen_random_uuid()
+alert_log,case_id,uuid,NO,null
+alert_log,org_id,uuid,NO,null
+alert_log,alert_type,text,NO,null
+alert_log,sent_at,timestamp with time zone,NO,now()
+alert_log,sent_week,date,NO,"(date_trunc('week'::text, now()))::date"
+alert_log,sent_to,text,NO,null
+alert_log,expiry_date,date,NO,null
+alert_log,expiry_doc_type,text,NO,null
+audit_log,id,uuid,NO,gen_random_uuid()
+audit_log,org_id,uuid,YES,null
+audit_log,branch_id,uuid,YES,null
+audit_log,member_id,uuid,YES,null
+audit_log,action,text,NO,null
+audit_log,entity_type,text,YES,null
+audit_log,entity_id,text,YES,null
+audit_log,metadata,jsonb,YES,null
+audit_log,created_at,timestamp with time zone,YES,now()
+audit_log,action_type,text,YES,null
+audit_log,counsellor_id,text,YES,null
+audit_log,counsellor_name,text,YES,null
+audit_log,case_id,uuid,YES,null
+audit_log,case_quadrant,text,YES,null
+branch_credit_pools,id,uuid,NO,gen_random_uuid()
+branch_credit_pools,org_id,uuid,NO,null
+branch_credit_pools,branch_id,uuid,NO,null
+branch_credit_pools,allocated,integer,NO,0
+branch_credit_pools,updated_at,timestamp with time zone,YES,now()
+branches,id,uuid,NO,gen_random_uuid()
+branches,org_id,uuid,NO,null
+branches,name,text,NO,null
+branches,city,text,YES,null
+branches,is_active,boolean,NO,true
+branches,created_at,timestamp with time zone,YES,now()
+case_serial_seq,org_id,uuid,NO,null
+case_serial_seq,seq_date,date,NO,null
+case_serial_seq,seq,integer,NO,0
+case_snapshots,id,uuid,NO,gen_random_uuid()
+case_snapshots,case_id,uuid,NO,null
+case_snapshots,org_id,uuid,NO,null
+case_snapshots,counsellor_name,text,YES,null
+case_snapshots,funnel_stage,text,YES,null
+case_snapshots,lead_status,text,YES,null
+case_snapshots,quadrant,text,YES,null
+case_snapshots,doc_score,integer,YES,null
+case_snapshots,viability_score,integer,YES,null
+case_snapshots,viability_confidence,numeric,YES,null
+case_snapshots,scoring_version,integer,NO,1
+case_snapshots,snapshot_date,date,NO,CURRENT_DATE
+case_snapshots,student_metadata,jsonb,YES,null
+case_snapshots,created_at,timestamp with time zone,YES,now()
+case_tasks,id,uuid,NO,gen_random_uuid()
+case_tasks,case_id,uuid,NO,null
+case_tasks,org_id,uuid,NO,null
+case_tasks,title,text,NO,null
+case_tasks,priority,text,NO,'medium'::text
+case_tasks,assigned_to_id,uuid,YES,null
+case_tasks,assigned_to_name,text,YES,null
+case_tasks,created_by_id,uuid,NO,null
+case_tasks,created_by_name,text,NO,null
+case_tasks,due_date,date,YES,null
+case_tasks,status,text,NO,'open'::text
+case_tasks,completed_at,timestamp with time zone,YES,null
+case_tasks,completed_by_id,uuid,YES,null
+case_tasks,completed_by_name,text,YES,null
+case_tasks,created_at,timestamp with time zone,NO,now()
+case_tasks,updated_at,timestamp with time zone,NO,now()
+cases,id,uuid,NO,gen_random_uuid()
+cases,org_id,uuid,NO,null
+cases,created_at,timestamp with time zone,YES,now()
+cases,updated_at,timestamp with time zone,YES,now()
+cases,student_name,text,YES,null
+cases,profile_data,jsonb,YES,null
+cases,results,jsonb,YES,null
+cases,doc_list,jsonb,YES,null
+cases,notes,text,YES,null
+cases,preferred_offer_index,integer,YES,0
+cases,counsellor_name,text,YES,null
+cases,overall_score,integer,YES,null
+cases,target_country,text,YES,null
+cases,sop_text,text,YES,''::text
+cases,university_sop,text,YES,null
+cases,visa_sop,text,YES,null
+cases,resume_text,text,YES,null
+cases,case_serial,text,YES,null
+cases,programme,text,YES,null
+cases,application_targets,jsonb,YES,'[]'::jsonb
+cases,lead_status,text,YES,'None'::text
+cases,expiry_date,date,YES,null
+cases,expiry_doc_type,text,YES,null
+cases,counsellor_email,text,YES,null
+cases,student_email,text,YES,null
+cases,branch_id,uuid,YES,null
+cases,created_by,uuid,YES,null
+cases,assigned_to,uuid,YES,null
+cases,status_updated_at,timestamp with time zone,YES,null
+cases,referral_source,text,YES,null
+cases,payment_status,text,YES,'Unpaid'::text
+cases,pending_status_suggestion,text,YES,null
+cases,pipeline_stage,text,YES,null
+cases,score_data,jsonb,YES,'{}'::jsonb
+chat_messages,id,uuid,NO,gen_random_uuid()
+chat_messages,case_id,uuid,NO,null
+chat_messages,org_id,uuid,NO,null
+chat_messages,sender_id,uuid,NO,null
+chat_messages,sender_name,text,NO,null
+chat_messages,sender_color,text,NO,null
+chat_messages,content,text,NO,null
+chat_messages,tags,ARRAY,YES,'{}'::text[]
+chat_messages,reply_to_id,uuid,YES,null
+chat_messages,attachments,jsonb,YES,'[]'::jsonb
+chat_messages,mentioned_ids,ARRAY,YES,'{}'::uuid[]
+chat_messages,is_deleted,boolean,NO,false
+chat_messages,deleted_at,timestamp with time zone,YES,null
+chat_messages,deleted_by_id,uuid,YES,null
+chat_messages,edited_at,timestamp with time zone,YES,null
+chat_messages,created_at,timestamp with time zone,NO,now()
+chat_messages,is_system,boolean,YES,false
+chat_messages,type,text,YES,null
+chat_messages,task_id,uuid,YES,null
+chat_messages,thread_type,text,YES,'internal'::text
+chat_messages,message_category,text,YES,'general'::text
+chat_messages,is_pinned,boolean,YES,false
+chat_messages,pinned_at,timestamp with time zone,YES,null
+chat_messages,pinned_by_name,text,YES,null
+chat_reads,id,uuid,NO,gen_random_uuid()
+chat_reads,case_id,uuid,NO,null
+chat_reads,org_id,uuid,NO,null
+chat_reads,member_id,uuid,NO,null
+chat_reads,member_name,text,NO,null
+chat_reads,last_read_at,timestamp with time zone,NO,now()
+chat_reads,granted_access,boolean,YES,false
+credit_transactions,id,uuid,NO,gen_random_uuid()
+credit_transactions,org_id,uuid,NO,null
+credit_transactions,branch_id,uuid,YES,null
+credit_transactions,member_id,uuid,YES,null
+credit_transactions,delta,integer,NO,null
+credit_transactions,reason,text,YES,null
+credit_transactions,created_at,timestamp with time zone,YES,now()
+daily_counselor_stats,id,uuid,NO,gen_random_uuid()
+daily_counselor_stats,org_id,uuid,NO,null
+daily_counselor_stats,counsellor_name,text,NO,null
+daily_counselor_stats,stat_date,date,NO,CURRENT_DATE
+daily_counselor_stats,actions_vip,integer,YES,0
+daily_counselor_stats,actions_sales,integer,YES,0
+daily_counselor_stats,actions_drainers,integer,YES,0
+daily_counselor_stats,actions_dead,integer,YES,0
+daily_counselor_stats,actions_total,integer,YES,0
+daily_counselor_stats,stage_changes,integer,YES,0
+daily_counselor_stats,docs_uploaded,integer,YES,0
+daily_counselor_stats,emails_sent,integer,YES,0
+doc_events,id,uuid,NO,gen_random_uuid()
+doc_events,org_id,uuid,NO,null
+doc_events,case_id,uuid,NO,null
+doc_events,doc_type,text,NO,null
+doc_events,source,text,NO,'email_auto'::text
+doc_events,changed_fields,ARRAY,NO,'{}'::text[]
+doc_events,university_name,text,YES,null
+doc_events,summary,text,YES,null
+doc_events,confidence,numeric,YES,null
+doc_events,created_at,timestamp with time zone,NO,now()
+doc_events,event_category,text,YES,null
+doc_events,metadata,jsonb,YES,'{}'::jsonb
+funnel_stage_entries,id,uuid,NO,gen_random_uuid()
+funnel_stage_entries,case_id,uuid,NO,null
+funnel_stage_entries,org_id,uuid,NO,null
+funnel_stage_entries,funnel_stage,text,NO,null
+funnel_stage_entries,entered_stage_at,timestamp with time zone,NO,now()
+funnel_stage_entries,exited_stage_at,timestamp with time zone,YES,null
+funnel_stage_entries,days_in_stage,integer,YES,null
+funnel_stage_entries,sla_breached,boolean,NO,false
+funnel_stage_entries,counsellor_name,text,YES,null
+inbox_alerts,id,uuid,NO,gen_random_uuid()
+inbox_alerts,org_id,uuid,NO,null
+inbox_alerts,case_id,uuid,NO,null
+inbox_alerts,inbox_event_id,uuid,YES,null
+inbox_alerts,event_type,text,NO,null
+inbox_alerts,university_name,text,YES,null
+inbox_alerts,due_date,date,YES,null
+inbox_alerts,is_urgent,boolean,NO,false
+inbox_alerts,confidence,numeric,YES,null
+inbox_alerts,summary,text,YES,null
+inbox_alerts,subject,text,YES,null
+inbox_alerts,sender_email,text,YES,null
+inbox_alerts,is_read,boolean,NO,false
+inbox_alerts,created_at,timestamp with time zone,YES,now()
+inbox_events,id,uuid,NO,gen_random_uuid()
+inbox_events,org_id,uuid,NO,null
+inbox_events,case_id,uuid,NO,null
+inbox_events,gmail_msg_id,text,YES,null
+inbox_events,subject,text,YES,null
+inbox_events,sender_email,text,YES,null
+inbox_events,sender_domain,text,YES,null
+inbox_events,body_snippet,text,YES,null
+inbox_events,received_at,timestamp with time zone,YES,null
+inbox_events,created_at,timestamp with time zone,YES,now()
+inbox_events,email_msg_id,text,YES,null
+inbox_sources,id,uuid,NO,gen_random_uuid()
+inbox_sources,org_id,uuid,NO,null
+inbox_sources,case_id,uuid,NO,null
+inbox_sources,forward_address,text,NO,null
+inbox_sources,source_type,text,NO,'email_routing'::text
+inbox_sources,created_by,uuid,YES,null
+inbox_sources,created_at,timestamp with time zone,YES,now()
+interview_sessions,id,uuid,NO,gen_random_uuid()
+interview_sessions,org_id,uuid,NO,null
+interview_sessions,case_id,uuid,NO,null
+interview_sessions,created_by,uuid,YES,null
+interview_sessions,mode,text,NO,'university'::text
+interview_sessions,question_bank,jsonb,NO,'[]'::jsonb
+interview_sessions,transcript,jsonb,NO,'[]'::jsonb
+interview_sessions,scores,jsonb,YES,null
+interview_sessions,recording_key,text,YES,null
+interview_sessions,status,text,NO,'in_progress'::text
+interview_sessions,created_at,timestamp with time zone,YES,now()
+interview_sessions,completed_at,timestamp with time zone,YES,null
+notifications,id,uuid,NO,gen_random_uuid()
+notifications,org_id,uuid,NO,null
+notifications,recipient_id,uuid,NO,null
+notifications,sender_id,uuid,YES,null
+notifications,sender_name,text,YES,null
+notifications,type,text,NO,null
+notifications,case_id,uuid,YES,null
+notifications,case_name,text,YES,null
+notifications,message_id,uuid,YES,null
+notifications,body,text,YES,null
+notifications,is_read,boolean,YES,false
+notifications,created_at,timestamp with time zone,YES,now()
+org_dashboard,id,uuid,YES,null
+org_dashboard,name,text,YES,null
+org_dashboard,email,text,YES,null
+org_dashboard,plan,text,YES,null
+org_dashboard,analyses_remaining,integer,YES,null
+org_dashboard,analyses_total,integer,YES,null
+org_dashboard,is_active,boolean,YES,null
+org_dashboard,access_code,text,YES,null
+org_dashboard,created_at,timestamp with time zone,YES,null
+org_dashboard,last_used_at,timestamp with time zone,YES,null
+org_dashboard,calls_today,bigint,YES,null
+org_dashboard,calls_this_month,bigint,YES,null
+org_dashboard,total_calls,bigint,YES,null
+org_dashboard,total_tokens,bigint,YES,null
+org_dashboard,total_cache_read,bigint,YES,null
+org_dashboard,total_cache_write,bigint,YES,null
+org_dashboard,total_cases,bigint,YES,null
+organizations,id,uuid,NO,gen_random_uuid()
+organizations,name,text,NO,null
+organizations,email,text,NO,null
+organizations,plan,text,NO,'starter'::text
+organizations,analyses_remaining,integer,NO,100
+organizations,analyses_total,integer,NO,100
+organizations,is_active,boolean,NO,true
+organizations,access_code,text,YES,null
+organizations,notes,text,YES,null
+organizations,created_at,timestamp with time zone,NO,now()
+organizations,last_used_at,timestamp with time zone,YES,null
+organizations,billing_cycle_start,date,YES,CURRENT_DATE
+organizations,credits_expiry_date,date,YES,null
+organizations,requirements_csv,text,YES,null
+organizations,sla_lead,integer,YES,3
+organizations,sla_docs_pending,integer,YES,14
+organizations,sla_ready_to_apply,integer,YES,7
+organizations,sla_applied,integer,YES,21
+organizations,sla_visa_prep,integer,YES,10
+organizations,viability_confidence_threshold,numeric,YES,0.40
+policy_alerts,id,uuid,NO,gen_random_uuid()
+policy_alerts,created_at,timestamp with time zone,YES,now()
+policy_alerts,updated_at,timestamp with time zone,YES,now()
+policy_alerts,country,text,YES,null
+policy_alerts,title,text,NO,null
+policy_alerts,detail,text,NO,null
+policy_alerts,source_url,text,YES,null
+policy_alerts,severity,text,NO,'medium'::text
+policy_alerts,effective_date,date,YES,null
+policy_alerts,verified_at,date,NO,CURRENT_DATE
+policy_alerts,affected_if,jsonb,YES,'{}'::jsonb
+policy_alerts,status,text,NO,'pending'::text
+policy_alerts,source,text,YES,'manual'::text
+policy_alerts,raw_source_text,text,YES,null
+policy_alerts,is_active,boolean,YES,true
+policy_alerts,org_id,uuid,YES,null
+policy_alerts,affected_countries,ARRAY,NO,'{}'::text[]
+policy_alerts,created_by,text,NO,'Admin'::text
+policy_alerts,expires_at,timestamp with time zone,YES,null
+profiles,id,uuid,NO,null
+profiles,org_id,uuid,NO,null
+profiles,role,text,NO,'counsellor'::text
+profiles,full_name,text,YES,null
+profiles,is_active,boolean,NO,true
+profiles,created_at,timestamp with time zone,YES,now()
+profiles,email,text,YES,null
+profiles,branch_id,uuid,YES,null
+profiles,status,text,NO,'invited'::text
+profiles,credit_quota,integer,YES,null
+profiles,invited_by,uuid,YES,null
+profiles,invite_token,text,YES,null
+profiles,last_active,timestamp with time zone,YES,null
+profiles,updated_at,timestamp with time zone,YES,now()
+profiles,restricted_tabs,jsonb,YES,'[]'::jsonb
+public_interview_links,id,uuid,NO,gen_random_uuid()
+public_interview_links,token,uuid,NO,null
+public_interview_links,org_id,uuid,NO,null
+public_interview_links,case_id,uuid,NO,null
+public_interview_links,created_by,uuid,YES,null
+public_interview_links,expires_at,timestamp with time zone,NO,null
+public_interview_links,is_active,boolean,YES,true
+public_interview_links,case_data,jsonb,NO,null
+public_interview_links,created_at,timestamp with time zone,YES,now()
+public_interview_sessions,id,uuid,NO,gen_random_uuid()
+public_interview_sessions,token,uuid,NO,null
+public_interview_sessions,org_id,uuid,NO,null
+public_interview_sessions,case_id,uuid,NO,null
+public_interview_sessions,mode,text,NO,'university'::text
+public_interview_sessions,question_bank,jsonb,NO,null
+public_interview_sessions,transcript,jsonb,YES,'[]'::jsonb
+public_interview_sessions,status,text,NO,'in_progress'::text
+public_interview_sessions,created_at,timestamp with time zone,YES,now()
+public_interview_sessions,completed_at,timestamp with time zone,YES,null
+student_inboxes,id,uuid,NO,gen_random_uuid()
+student_inboxes,org_id,uuid,NO,null
+student_inboxes,case_id,uuid,NO,null
+student_inboxes,connected_by,uuid,YES,null
+student_inboxes,student_email,text,NO,null
+student_inboxes,provider,text,NO,'gmail'::text
+student_inboxes,refresh_token,text,YES,null
+student_inboxes,status,text,NO,'active'::text
+student_inboxes,last_synced_at,timestamp with time zone,YES,null
+student_inboxes,created_at,timestamp with time zone,YES,now()
+student_shortlists,id,uuid,NO,gen_random_uuid()
+student_shortlists,org_id,uuid,NO,null
+student_shortlists,student_key,text,NO,null
+student_shortlists,match_keys,jsonb,NO,'[]'::jsonb
+student_shortlists,updated_at,timestamp with time zone,YES,now()
+student_shortlists,chat_history,jsonb,NO,'[]'::jsonb
+usage_log,id,bigint,NO,nextval('usage_log_id_seq'::regclass)
+usage_log,org_id,uuid,YES,null
+usage_log,model,text,YES,null
+usage_log,input_tokens,integer,YES,0
+usage_log,output_tokens,integer,YES,0
+usage_log,analyses_used,integer,YES,1
+usage_log,endpoint,text,YES,'proxy'::text
+usage_log,created_at,timestamp with time zone,NO,now()
+usage_log,cache_read,integer,YES,0
+usage_log,cache_write,integer,YES,0
+usage_log,case_id,uuid,YES,null
+visa_rules,id,uuid,NO,gen_random_uuid()
+visa_rules,country,text,NO,null
+visa_rules,visa_type,text,NO,'Student'::text
+visa_rules,required_fields,jsonb,NO,'[]'::jsonb
+visa_rules,recommended_fields,jsonb,NO,'[]'::jsonb
+visa_rules,created_at,timestamp with time zone,YES,now()

@@ -20,11 +20,13 @@ import AlertsPage from './AlertsPage';
 import HomeDashboard from './HomeDashboard';
 import './HomeDashboard.css';
 import InboxDashboard from './InboxDashboard';
+import GlobalInbox from './GlobalInbox';
 import CalendarPage from './CalendarPage';
 import StudentDashboard from './StudentDashboard';
 import RadarMatrix from './RadarMatrix';
 import { computeDocScore as _computeDocScoreForRadar, viabilityScore as _viabilityScoreForRadar } from './docScore';
 import CaseHistory from './CaseHistory';
+import CaseFile from './CaseFile';
 import AnalyticsDashboard from './AnalyticsDashboard';
 import { MockInterview } from './mockinterview'; // ✅ named importmo
 import PublicInterview from './PublicInterview';
@@ -37,7 +39,7 @@ import {
   ChevronDown, Clock, ClipboardList, Copy, CreditCard, DollarSign, Download, Edit3, Eye, EyeOff,
   File, FileSpreadsheet, FileText, Flag, FolderDown, FolderOpen, Globe, GraduationCap,
   Info, Languages, LayoutDashboard, ListChecks, Loader2, Mail, MessageSquare, Mic,
-  Moon, Pencil, Plus, Printer, RefreshCw, Reply, Save, Search, Send, ShieldCheck, Star, Sun,
+  Moon, Pencil, Plus, Printer, RefreshCw, Reply, Save, Search, Send, ShieldCheck, Sparkles, Star, Sun,
   Target, Trash2, TriangleAlert, Upload, User, Users, X, XCircle, ZoomIn, Dot
 } from 'lucide-react';
 
@@ -100,7 +102,7 @@ import ProfileCard from './components/ProfileCard';
 import {
   EligSummaryCards, EligFindings, EligCard,
   RejectionsCard, MissingCard, FlagsCard, RisksCard,
-  DetectedDocsCard,
+  DetectedDocsCard, deriveDetectedDocs,
 } from './components/EligibilityCards';
 import {
   SidebarDocChecklist, UniversityChecker,
@@ -1097,6 +1099,7 @@ function VisaLensApp({ orgSession, onLogout }) {
   // Max 3 panels. Opening the same case un-minimises it rather than duplicating.
   const [openChats, setOpenChats] = useState([]);
   const [peekOpen,  setPeekOpen]  = useState(false);
+  const [caseFileData, setCaseFileData] = useState(null); // null = closed, object = open CaseFile overlay
 
   function openChat(caseId, studentName) {
     setOpenChats(prev => {
@@ -1120,12 +1123,23 @@ function VisaLensApp({ orgSession, onLogout }) {
     setOpenChats(prev => prev.map(c => c.caseId === caseId ? { ...c, minimised: !c.minimised } : c));
   }
   // ─────────────────────────────────────────────────────────────────────
-  const fileRef = useRef();
+  // Opens the CaseFile (timeline) overlay for any case object or id
+  function handleOpenCaseFile(caseObjOrId) {
+    if (!caseObjOrId) return;
+    if (typeof caseObjOrId === 'string') {
+      // passed just an id — find from cases list
+      const found = cases.find(c => c.id === caseObjOrId);
+      setCaseFileData(found || { id: caseObjOrId });
+    } else {
+      setCaseFileData(caseObjOrId);
+    }
+  }
+  // ─────────────────────────────────────────────────────────────────────
   const autoSaveTimer = useRef(null);
   const resultsRef = useRef(null);
   const qualitiesRef = useRef({});
   const preScanRunning = useRef(false);
-
+  const fileRef = useRef(null);
 // ─── INSERT NEW REALTIME SYNC BRIDGE HERE ──────────────────────────
 useEffect(() => {
   if (!activeCaseId || !orgSession?.org_id) return;
@@ -3680,13 +3694,20 @@ Previous Score: ${results.eligibility.overallScore}/100 | Missing: ${(results.mi
                 <span className="sidebar-nav-icon"><LayoutDashboard size={16}/></span>
                 {sidebarOpen && <span className="sidebar-nav-label">Student Dashboard</span>}
                 {totalCases > 0 && <span className={`sidebar-nav-badge${tab==="dashboard"?" sidebar-nav-badge--active":""}`}>{totalCases}</span>}
-                {chatUnread > 0 && tab !== "dashboard" && (
+              </button>
+            )}
+
+            {!orgSession?.restricted_tabs?.includes("chat_inbox") && (
+              <button role="tab" aria-selected={tab==="chat_inbox"} className={`sidebar-nav-item${tab==="chat_inbox"?" on":""}`} onClick={()=>setTab("chat_inbox")} title="Chat Inbox">
+                <span className="sidebar-nav-icon"><MessageSquare size={16}/></span>
+                {sidebarOpen && <span className="sidebar-nav-label">Chat Inbox</span>}
+                {chatUnread > 0 && (
                   <span
-                    className="sidebar-nav-badge sidebar-nav-badge--warn"
+                    className={`sidebar-nav-badge${tab==="chat_inbox" ? " sidebar-nav-badge--active" : " sidebar-nav-badge--warn"}`}
                     title={`${chatUnread} unread chat message${chatUnread !== 1 ? "s" : ""}`}
-                    style={{ background: "rgba(29,107,232,.15)", color: "#1D6BE8" }}
+                    style={tab !== "chat_inbox" ? { background: "rgba(29,107,232,.15)", color: "#1D6BE8" } : {}}
                   >
-                    💬{chatUnread}
+                    {chatUnread}
                   </span>
                 )}
               </button>
@@ -4694,6 +4715,7 @@ Previous Score: ${results.eligibility.overallScore}/100 | Missing: ${(results.mi
                             messages={chatMessages}
                             setMessages={setChatMessages}
                             onCreditsUpdate={setOrgCredits}
+                            caseId={activeCaseId}
                           />
                         </div>
                       )}
@@ -4724,6 +4746,7 @@ Previous Score: ${results.eligibility.overallScore}/100 | Missing: ${(results.mi
                 messages={chatMessages} 
                 setMessages={setChatMessages}
                 onCreditsUpdate={setOrgCredits}
+                caseId={activeCaseId}
               />
             </>
           )}
@@ -4840,6 +4863,7 @@ Previous Score: ${results.eligibility.overallScore}/100 | Missing: ${(results.mi
                 onOpenChat={openChat}
                 openChatCount={openChats.length}
                 onPeekChange={setPeekOpen}
+                onOpenCaseFile={handleOpenCaseFile}
                 onPaymentUpdate={(caseId, newStatus) => {
                   setCases(prev => prev.map(c => c.id === caseId ? { ...c, paymentStatus: newStatus } : c));
                 }}
@@ -4853,6 +4877,7 @@ Previous Score: ${results.eligibility.overallScore}/100 | Missing: ${(results.mi
               orgSession={orgSession}
               callGeminiInsight={callGeminiInsight}
               onOpenCase={handleLoadCase}
+              onOpenCaseFile={handleOpenCaseFile}
               totalCases={totalCases}
               lastSaved={lastSaved}
               policyAlerts={policyAlerts}
@@ -4878,11 +4903,27 @@ Previous Score: ${results.eligibility.overallScore}/100 | Missing: ${(results.mi
             />
           )}
 
+          {/* ── CHAT INBOX ── */}
+          {tab==="chat_inbox"&&(
+            <GlobalInbox
+              session={orgSession}
+              onOpenCase={(caseId, caseName) => {
+                handleLoadCase({ id: caseId, studentName: caseName });
+                setTab("analyze");
+              }}
+              onOpenDashboard={(caseId, caseName) => {
+                handleLoadCase({ id: caseId, studentName: caseName });
+                setTab("dashboard");
+              }}
+            />
+          )}
+
           {/* ── CALENDAR ── */}
           {tab==="calendar"&&(
             <CalendarPage
               cases={cases}
               onOpenCase={handleLoadCase}
+              onOpenCaseFile={handleOpenCaseFile}
               initialDate={calendarDate}
             />
           )}
@@ -4964,6 +5005,17 @@ Previous Score: ${results.eligibility.overallScore}/100 | Missing: ${(results.mi
         onToggleMinimise={toggleChatMinimise}
         peekOpen={peekOpen}
       />
+
+      {/* ── CASE FILE OVERLAY — timeline / tasks / notes view ── */}
+      {caseFileData && (
+        <CaseFile
+          caseId={caseFileData.id}
+          caseData={caseFileData}
+          onClose={() => setCaseFileData(null)}
+          onOpenFull={(cd) => { setCaseFileData(null); handleLoadCase(cd || caseFileData); }}
+          counsellorOptions={orgMembers.map(m => m.full_name).filter(Boolean)}
+        />
+      )}
     </ChatContext.Provider>
   );
 }
@@ -4974,7 +5026,7 @@ Previous Score: ${results.eligibility.overallScore}/100 | Missing: ${(results.mi
    and in the tab render guard above). Loads its own cases from Supabase so
    it works independently of any currently-loaded student in the Analyser.
 ════════════════════════════════════════════════════════════════════════ */
-function RadarIntelPage({ orgSession, callGeminiInsight, onOpenCase, totalCases, lastSaved, policyAlerts = [] }) {
+function RadarIntelPage({ orgSession, callGeminiInsight, onOpenCase, onOpenCaseFile, totalCases, lastSaved, policyAlerts = [] }) {
   const [cases,       setCases]       = React.useState([]);
   const [loading,     setLoading]     = React.useState(false);
   const [lastLoaded,  setLastLoaded]  = React.useState(null);
@@ -5142,6 +5194,7 @@ function RadarIntelPage({ orgSession, callGeminiInsight, onOpenCase, totalCases,
         <RadarMatrix
           cases={filtered}
           onOpenCase={onOpenCase}
+          onOpenCaseFile={onOpenCaseFile}
           callGeminiInsight={callGeminiInsight}
           externalInsightCache={geminiCache.current}
           previousQuadrants={previousQuadrants}
@@ -5403,6 +5456,7 @@ function TaskPopover({ msg, caseId, studentName, orgMembers, anchorRect, onClose
         org_id:      orgId,
         sender_id:   myId,
         sender_name: myName,
+        sender_color: '#6B7280',
         content:     `Task created: "${title.trim()}"${assigneeName ? ` → assigned to ${assigneeName}` : ''}${priority !== 'medium' ? ` · ${priority}` : ''}`,
         tags:        [],
         attachments: [],
@@ -5418,7 +5472,6 @@ function TaskPopover({ msg, caseId, studentName, orgMembers, anchorRect, onClose
           recipient_id: assigneeId,
           org_id:       orgId,
           type:         'task_assigned',
-          actor_name:   myName,
           sender_name:  myName,
           case_id:      caseId,
           case_name:    studentName,
@@ -5719,6 +5772,27 @@ function TrayMsgRow({ msg, isMe, pal, grouped, onReply, onMakeTask }) {
   );
 }
 
+function SummaryActionBtn({ label, icon, onClick, active, activeLabel, loading }) {
+  return (
+    <button onClick={onClick} disabled={loading}
+      style={{
+        display:'flex',alignItems:'center',gap:5,
+        padding:'0 10px',height:30,borderRadius:6,border:'none',
+        background: active ? 'rgba(5,150,105,.12)' : 'rgba(124,58,237,.1)',
+        color: active ? '#059669' : '#7C3AED',
+        fontSize:10,fontWeight:700,fontFamily:'var(--fu)',
+        cursor: loading||active ? 'default':'pointer',transition:'all .15s',
+        whiteSpace:'nowrap',
+      }}
+      onMouseEnter={e=>{if(!active&&!loading) e.currentTarget.style.background='rgba(124,58,237,.2)';}}
+      onMouseLeave={e=>{if(!active&&!loading) e.currentTarget.style.background='rgba(124,58,237,.1)';}}
+    >
+      {loading ? <Loader2 size={10} style={{animation:'spin .7s linear infinite'}}/> : icon}
+      {active ? activeLabel : label}
+    </button>
+  );
+}
+
 function ChatTrayThread({ caseId, studentName }) {
   const sessionRef = React.useRef(getOrgSession());
   const session    = sessionRef.current;
@@ -5733,6 +5807,12 @@ function ChatTrayThread({ caseId, studentName }) {
   const [offset,      setOffset]      = React.useState(0);
   const [draft,       setDraft]       = React.useState('');
   const [replyTo,     setReplyTo]     = React.useState(null);
+  const [summarizing,  setSummarizing]  = React.useState(false);
+  const [summaryCard,  setSummaryCard]  = React.useState(null);
+  const [summaryOpen,  setSummaryOpen]  = React.useState(false);
+  const [summaryCopied,    setSummaryCopied]    = React.useState(false);
+  const [summaryNoteSaving, setSummaryNoteSaving] = React.useState(false);
+  const [summaryNoteSaved,  setSummaryNoteSaved]  = React.useState(false);
 
   // @mention state
   const [orgMembers,   setOrgMembers]   = React.useState([]);
@@ -5877,6 +5957,45 @@ function ChatTrayThread({ caseId, studentName }) {
     setSending(false); markRead(); inputRef.current?.focus();
   }
 
+  async function summarizeChat() {
+    if (!caseId || !session?.org_id || summarizing) return;
+    setSummarizing(true);
+    try {
+      const { data: chatMsgs, error } = await supabase
+        .from('chat_messages')
+        .select('sender_name, content, created_at')
+        .eq('case_id', caseId).eq('org_id', session.org_id)
+        .eq('is_deleted', false).neq('is_system', true)
+        .order('created_at', { ascending: false }).limit(50);
+      if (error) throw new Error(error.message);
+      if (!chatMsgs || chatMsgs.length === 0) {
+        setSummaryCard({ text: 'No messages to summarize yet.' }); setSummaryOpen(true); return;      }
+      const lines = [...chatMsgs].reverse().map(m => `[${m.sender_name}]: ${m.content}`).join('\n');
+      const { data: { session: authSess } } = await supabase.auth.getSession();
+      const token = authSess?.access_token || session.access_token || '';
+      const resp = await fetch(PROXY_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({
+          org_id: session.org_id, model: 'claude-haiku-4-5-20251001', max_tokens: 400,
+          system: 'You are summarizing a visa case team chat. Extract: key decisions made, pending actions, who is responsible for what, any deadlines mentioned. Be concise — max 150 words. Format with short bullet points grouped under bold headings: **Decisions**, **Pending Actions**, **Deadlines**. Omit any heading that has nothing to report.',
+          messages: [{ role: 'user', content: `Summarize this team chat:\n\n${lines}` }],
+        }),
+      });
+      const data = await resp.json();
+      if (data.error) throw new Error(data.error.message || 'API error');
+      const summaryText = data.content?.map(b => b.text || '').join('') || '(no summary)';
+      setSummaryCard({ text: summaryText }); setSummaryOpen(true);
+      await supabase.from('chat_messages').insert({
+        case_id: caseId, org_id: session.org_id, sender_id: myId, sender_name: myName,
+        sender_color: '#6B7280', content: `📋 AI Chat Summary\n\n${summaryText}`,
+        tags: [], attachments: [], is_deleted: false, is_system: true, type: 'ai_summary',
+      });
+    } catch (e) {
+      setSummaryCard({ text: `⚠️ Could not summarize: ${e.message}` }); setSummaryOpen(true);
+    } finally { setSummarizing(false); }
+  }
+
   const mentionSuggestions=React.useMemo(()=>{
     if(!mentionQuery) return orgMembers.slice(0,8);
     const q=mentionQuery.toLowerCase();
@@ -5913,7 +6032,117 @@ function ChatTrayThread({ caseId, studentName }) {
   }
 
   return (
-    <div style={{display:'flex',flexDirection:'column',height:'100%'}}>
+    <div style={{display:'flex',flexDirection:'column',height:'100%',position:'relative'}}>
+      {/* ── Toolbar ── */}
+      <div style={{display:'flex',alignItems:'center',gap:5,padding:'5px 8px',borderBottom:'1px solid var(--bd)',background:'var(--s2)',flexShrink:0}}>
+        <span style={{flex:1,fontSize:9,color:'var(--t3)',fontFamily:'var(--fu)'}}>
+          {messages.filter(m=>!m.is_deleted).length} messages
+        </span>
+        <button
+          onClick={summarizeChat} disabled={summarizing}
+          title="AI Summary — summarize this team chat"
+          style={{
+            display:'flex',alignItems:'center',gap:summarizing?3:0,
+            padding:summarizing?'0 7px':'0',
+            width:summarizing?'auto':24, height:24, borderRadius:5, border:'none',
+            background:summarizing?'var(--s3)':'rgba(124,58,237,.12)',
+            color:summarizing?'var(--t3)':'#7C3AED',
+            fontSize:10, fontWeight:700, fontFamily:'var(--fu)',
+            cursor:summarizing?'default':'pointer', transition:'all .15s',
+            whiteSpace:'nowrap', flexShrink:0, justifyContent:'center',
+          }}
+          onMouseEnter={e=>{if(!summarizing) e.currentTarget.style.background='rgba(124,58,237,.22)';}}
+          onMouseLeave={e=>{if(!summarizing) e.currentTarget.style.background='rgba(124,58,237,.12)';}}
+        >
+          {summarizing
+            ? <><Loader2 size={10} style={{animation:'spin .7s linear infinite'}}/> Summarizing…</>
+            : <Sparkles size={11}/>
+          }
+        </button>
+      </div>
+
+      {/* ── AI Summary overlay panel ── */}
+      {summaryCard&&summaryOpen&&(
+        <div style={{
+          position:'absolute',inset:0,zIndex:400,
+          display:'flex',flexDirection:'column',
+          background:'var(--s1)',
+          animation:'tray-slide-up .18s ease',
+        }}>
+          <style>{`@keyframes tray-slide-up{from{transform:translateY(12px);opacity:0}to{transform:translateY(0);opacity:1}}`}</style>
+          {/* Header */}
+          <div style={{display:'flex',alignItems:'center',gap:8,padding:'10px 12px',borderBottom:'1px solid var(--bd)',background:'var(--s2)',flexShrink:0}}>
+            <div style={{width:26,height:26,borderRadius:7,background:'rgba(124,58,237,.12)',border:'1px solid rgba(124,58,237,.2)',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+              <Sparkles size={13} color="#7C3AED"/>
+            </div>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:11,fontWeight:700,color:'var(--t1)',fontFamily:'var(--fh)'}}>AI Chat Summary</div>
+              <div style={{fontSize:9,color:'var(--t3)',fontFamily:'var(--fu)'}}>{studentName}</div>
+            </div>
+            <button onClick={()=>setSummaryOpen(false)}
+              style={{width:24,height:24,borderRadius:5,border:'none',background:'var(--s3)',color:'var(--t2)',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+              <X size={11}/>
+            </button>
+          </div>
+          {/* Body */}
+          <div style={{flex:1,overflowY:'auto',padding:'14px 14px 10px'}}>
+            {summaryCard.text.split('\n').map((line,i)=>{
+              if(/^\*\*(.+)\*\*$/.test(line)) return (
+                <div key={i} style={{display:'flex',alignItems:'center',gap:5,marginTop:i>0?14:0,marginBottom:4}}>
+                  <div style={{width:3,height:12,borderRadius:2,background:'#7C3AED',flexShrink:0}}/>
+                  <span style={{fontSize:10,fontWeight:800,color:'#7C3AED',fontFamily:'var(--fh)',textTransform:'uppercase',letterSpacing:'.07em'}}>{line.replace(/\*\*/g,'')}</span>
+                </div>
+              );
+              if(line.startsWith('• ')||line.startsWith('- ')) return (
+                <div key={i} style={{display:'flex',gap:6,marginTop:4,paddingLeft:8}}>
+                  <span style={{color:'#7C3AED',flexShrink:0,marginTop:1,fontSize:12,lineHeight:1}}>·</span>
+                  <span style={{fontSize:12,color:'var(--t1)',fontFamily:'var(--fu)',lineHeight:1.55}}>{line.slice(2)}</span>
+                </div>
+              );
+              return line?<div key={i} style={{fontSize:12,color:'var(--t2)',fontFamily:'var(--fu)',lineHeight:1.55,marginTop:3}}>{line}</div>:null;
+            })}
+          </div>
+          {/* Action bar */}
+          <div style={{display:'flex',gap:6,padding:'10px 12px',borderTop:'1px solid var(--bd)',background:'var(--s2)',flexShrink:0}}>
+            <SummaryActionBtn
+              label="Copy" icon={<Copy size={11}/>}
+              onClick={()=>{
+                navigator.clipboard?.writeText(summaryCard.text).catch(()=>{});
+                setSummaryCopied(true); setTimeout(()=>setSummaryCopied(false),1800);
+              }}
+              active={summaryCopied} activeLabel="Copied!"
+            />
+            <SummaryActionBtn
+              label="Save as Note" icon={<Save size={11}/>}
+              onClick={async()=>{
+                if(summaryNoteSaved||summaryNoteSaving) return;
+                setSummaryNoteSaving(true);
+                try{
+                  const s=session;
+                  await supabase.from('doc_events').insert({
+                    case_id:caseId, org_id:s.org_id,
+                    event_category:'note', doc_type:'ai_summary',
+                    source:'ai_chat_summary', changed_fields:[],
+                    summary:`AI Chat Summary\n\n${summaryCard.text}`,
+                    university_name:myName, confidence:1.0,
+                    created_at:new Date().toISOString(),
+                  });
+                  setSummaryNoteSaved(true);
+                  setTimeout(()=>setSummaryNoteSaved(false),2500);
+                }catch(e){console.error('[summary] save note error:',e);}
+                finally{setSummaryNoteSaving(false);}
+              }}
+              active={summaryNoteSaved} activeLabel="Saved to Timeline!"
+              loading={summaryNoteSaving}
+            />
+            <button onClick={()=>setSummaryOpen(false)}
+              style={{marginLeft:'auto',padding:'0 10px',height:30,borderRadius:6,border:'1px solid var(--bd)',background:'transparent',color:'var(--t3)',fontSize:10,fontFamily:'var(--fu)',cursor:'pointer'}}>
+              Back to chat
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Messages */}
       <div style={{flex:1,overflowY:'auto',padding:'8px 10px',display:'flex',flexDirection:'column',gap:2}}>
         {hasMore&&(

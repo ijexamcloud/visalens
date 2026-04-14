@@ -249,7 +249,7 @@ function EventPill({ event, onClick }) {
 }
 
 /* ─── day detail panel ───────────────────────────────────────────── */
-function DayPanel({ date, events, archivedEvents = [], caseMap, onOpenCase, onAddEvent, onArchive, onUnarchive }) {
+function DayPanel({ date, events, archivedEvents = [], caseMap, onOpenCase, onOpenCaseFile, onAddEvent, onArchive, onUnarchive }) {
   const [archiveOpen, setArchiveOpen] = useState(false);
 
   if (!date) {
@@ -347,7 +347,7 @@ function DayPanel({ date, events, archivedEvents = [], caseMap, onOpenCase, onAd
               </button>
             </div>
           ) : (
-            events.map(ev => <DayEventCard key={ev.id} ev={ev} caseMap={caseMap} onOpenCase={onOpenCase} onArchive={onArchive} />)
+            events.map(ev => <DayEventCard key={ev.id} ev={ev} caseMap={caseMap} onOpenCase={onOpenCase} onOpenCaseFile={onOpenCaseFile} onArchive={onArchive} />)
           )}
         </div>
 
@@ -385,6 +385,7 @@ function DayPanel({ date, events, archivedEvents = [], caseMap, onOpenCase, onAd
                   <DayEventCard
                     key={ev.id} ev={ev} caseMap={caseMap}
                     onOpenCase={onOpenCase}
+                    onOpenCaseFile={onOpenCaseFile}
                     archived
                     onUnarchive={onUnarchive}
                   />
@@ -399,7 +400,7 @@ function DayPanel({ date, events, archivedEvents = [], caseMap, onOpenCase, onAd
 }
 
 /* ─── single event card used in DayPanel ────────────────────────── */
-function DayEventCard({ ev, caseMap, onOpenCase, onArchive, onUnarchive, archived = false }) {
+function DayEventCard({ ev, caseMap, onOpenCase, onOpenCaseFile, onArchive, onUnarchive, archived = false }) {
   const cfg      = eventCfg(ev.type);
   const Icon     = cfg.icon;
   const caseObj  = caseMap[ev.caseId];
@@ -499,6 +500,22 @@ function DayEventCard({ ev, caseMap, onOpenCase, onArchive, onUnarchive, archive
               }}
             >
               <ExternalLink size={10} /> Open
+            </button>
+          )}
+          {caseObj && !archived && onOpenCaseFile && (
+            <button
+              onClick={() => onOpenCaseFile(caseObj)}
+              title="Open case file (timeline)"
+              style={{
+                display: "flex", alignItems: "center", gap: 4,
+                padding: "4px 9px", borderRadius: 6, fontSize: 11, fontWeight: 600,
+                border: "1px solid rgba(13,148,136,.3)", background: "rgba(13,148,136,.07)",
+                color: "#0D9488", cursor: "pointer", transition: "all .12s",
+              }}
+              onMouseEnter={e => { e.currentTarget.style.background = "rgba(13,148,136,.15)"; }}
+              onMouseLeave={e => { e.currentTarget.style.background = "rgba(13,148,136,.07)"; }}
+            >
+              <ClipboardList size={10} /> Case File
             </button>
           )}
           {caseObj && !archived && (
@@ -780,7 +797,7 @@ function AddEventModal({ defaultDate, cases, onSave, onClose }) {
 }
 
 /* ─── MAIN COMPONENT ─────────────────────────────────────────────── */
-export default function CalendarPage({ cases = [], onOpenCase, initialDate }) {
+export default function CalendarPage({ cases = [], onOpenCase, onOpenCaseFile, initialDate }) {
   const today      = new Date();
   const initDate   = initialDate ? new Date(initialDate + "T00:00:00") : today;
   const [year,     setYear]     = useState(initDate.getFullYear());
@@ -810,6 +827,24 @@ export default function CalendarPage({ cases = [], onOpenCase, initialDate }) {
   /* ── load task due dates from Supabase ── */
   useEffect(() => {
     fetchTaskEvents().then(setTaskEvents);
+  }, []);
+
+  /* ── realtime: refresh tasks when any task is inserted/updated/deleted ── */
+  useEffect(() => {
+    const s = getOrgSession();
+    if (!s?.org_id) return;
+    const channel = supabase
+      .channel('calendar-tasks')
+      .on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'case_tasks',
+        filter: `org_id=eq.${s.org_id}`,
+      }, () => {
+        fetchTaskEvents().then(setTaskEvents);
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
   }, []);
 
   /* ── build unified events (inbox + tasks + custom), filter archived ── */
@@ -1219,6 +1254,19 @@ export default function CalendarPage({ cases = [], onOpenCase, initialDate }) {
                                 }}>
                                   <ExternalLink size={10} /> Open
                                 </button>
+                                {onOpenCaseFile && (
+                                  <button onClick={() => onOpenCaseFile(caseObj)} style={{
+                                    display: "flex", alignItems: "center", gap: 4,
+                                    padding: "4px 10px", borderRadius: 6, fontSize: 11, fontWeight: 600,
+                                    border: "1px solid rgba(13,148,136,.3)", background: "rgba(13,148,136,.07)",
+                                    color: "#0D9488", cursor: "pointer", transition: "all .12s",
+                                  }}
+                                    onMouseEnter={e => { e.currentTarget.style.background = "rgba(13,148,136,.15)"; }}
+                                    onMouseLeave={e => { e.currentTarget.style.background = "rgba(13,148,136,.07)"; }}
+                                  >
+                                    <ClipboardList size={10} /> Case File
+                                  </button>
+                                )}
                                 <button onClick={() => chatBridge.open(ev.caseId, ev.studentName)} style={{
                                   display: "flex", alignItems: "center", gap: 4,
                                   padding: "4px 10px", borderRadius: 6, fontSize: 11, fontWeight: 600,
@@ -1248,6 +1296,7 @@ export default function CalendarPage({ cases = [], onOpenCase, initialDate }) {
             archivedEvents={archivedEvents.filter(ev => ev.date === selected)}
             caseMap={caseMap}
             onOpenCase={onOpenCase}
+            onOpenCaseFile={onOpenCaseFile}
             onAddEvent={() => setModalDate(selected)}
             onArchive={handleArchiveEvent}
             onUnarchive={handleUnarchiveEvent}

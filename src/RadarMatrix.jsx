@@ -174,7 +174,7 @@ function ConfirmDialog({ title, body, confirmLabel, confirmColor, onConfirm, onC
 /* ════════════════════════════════════════════════════════════════════════
    DETAIL SIDE PANEL
 ════════════════════════════════════════════════════════════════════════ */
-function DetailPanel({ caseData, aiInsight, onClose, onOpenCase, onReassign, onStatusChange, counsellorList, isManager = false }) {
+function DetailPanel({ caseData, aiInsight, onClose, onOpenCase, onOpenCaseFile, onReassign, onStatusChange, counsellorList, isManager = false }) {
   const [reassignOpen,  setReassignOpen]  = useState(false);
   const [reassigning,   setReassigning]   = useState(false);
   const [statusSaving,  setStatusSaving]  = useState(false);
@@ -367,7 +367,13 @@ function DetailPanel({ caseData, aiInsight, onClose, onOpenCase, onReassign, onS
           style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '8px 12px', borderRadius: 8, border: 'none', background: 'var(--p)', color: '#fff', cursor: 'pointer', fontSize: 12, fontWeight: 600, fontFamily: 'var(--fu)', width: '100%', transition: 'background .15s' }}
           onMouseEnter={e => e.currentTarget.style.background = 'var(--pm)'}
           onMouseLeave={e => e.currentTarget.style.background = 'var(--p)'}
-        ><ExternalLink size={13} /> Open Full Profile</button>
+        ><ExternalLink size={13} /> Open Data Profile</button>
+
+        <button onClick={() => { onClose(); onOpenCaseFile?.(caseData); }}
+          style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '8px 12px', borderRadius: 8, border: '1px solid var(--bd)', background: 'var(--s2)', color: 'var(--t1)', cursor: 'pointer', fontSize: 12, fontWeight: 600, fontFamily: 'var(--fu)', width: '100%', transition: 'background .15s' }}
+          onMouseEnter={e => e.currentTarget.style.background = 'var(--s3)'}
+          onMouseLeave={e => e.currentTarget.style.background = 'var(--s2)'}
+        ><Clock size={13} /> Open Case File</button>
 
         {smartActions.map((a, i) => {
           const Icon = a.icon;
@@ -527,6 +533,7 @@ export default function RadarMatrix({
   cases = [],
   onStudentClick,
   onOpenCase,
+  onOpenCaseFile,
   onBulkAction,
   callGeminiInsight,
   previousQuadrants = {},
@@ -845,6 +852,7 @@ export default function RadarMatrix({
             aiInsight={aiInsight}
             onClose={() => { setSelectedCase(null); setAiInsight(null); }}
             onOpenCase={handleOpen}
+            onOpenCaseFile={onOpenCaseFile}
             onReassign={onReassign}
             onStatusChange={onStatusChange}
             counsellorList={counsellorList}
