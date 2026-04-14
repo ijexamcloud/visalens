@@ -594,7 +594,39 @@ export default function ChatThread({ caseId, studentName, session: propSession }
     const { newMsg, currentPins } = pinReplaceModal;
     const now = new Date().toISOString();
 
-    // Optimistic updates
+    // Close modal first
+    setPinReplaceModal(null);
+
+    // Perform DB operations atomically - unpin first, then pin
+    const { error: unpinError } = await supabase
+      .from('chat_messages')
+      .update({ is_pinned: false, pinned_at: null, pinned_by_name: null })
+      .eq('id', selectedPinId)
+      .eq('org_id', session.org_id);
+
+    if (unpinError) {
+      console.error('[ChatThread] unpin error:', unpinError);
+      return;
+    }
+
+    const { error: pinError } = await supabase
+      .from('chat_messages')
+      .update({ is_pinned: true, pinned_at: now, pinned_by_name: myName })
+      .eq('id', newMsg.id)
+      .eq('org_id', session.org_id);
+
+    if (pinError) {
+      console.error('[ChatThread] pin error:', pinError);
+      // Re-pin the original message since pin failed
+      await supabase
+        .from('chat_messages')
+        .update({ is_pinned: true, pinned_at: now, pinned_by_name: myName })
+        .eq('id', selectedPinId)
+        .eq('org_id', session.org_id);
+      return;
+    }
+
+    // Only update optimistic state after DB operations succeed
     setMessages(prev => prev.map(m =>
       m.id === selectedPinId
         ? { ...m, is_pinned: false, pinned_at: null, pinned_by_name: null }
@@ -609,31 +641,8 @@ export default function ChatThread({ caseId, studentName, session: propSession }
         .sort((a, b) => new Date(a.pinned_at || a.created_at) - new Date(b.pinned_at || b.created_at));
     });
 
-    // Close modal
-    setPinReplaceModal(null);
-
-    // Unpin selected message in DB
-    const { error: unpinError } = await supabase
-      .from('chat_messages')
-      .update({ is_pinned: false, pinned_at: null, pinned_by_name: null })
-      .eq('id', selectedPinId)
-      .eq('org_id', session.org_id);
-    if (unpinError) console.error('[ChatThread] unpin error:', unpinError);
-
-    // Pin new message in DB
-    const { error: pinError } = await supabase
-      .from('chat_messages')
-      .update({ is_pinned: true, pinned_at: now, pinned_by_name: myName })
-      .eq('id', newMsg.id)
-      .eq('org_id', session.org_id);
-    if (pinError) {
-      console.error('[ChatThread] pin error:', pinError);
-      // Roll back on error
-      setMessages(prev => prev.map(m =>
-        m.id === newMsg.id ? newMsg : m
-      ));
-      setPinnedMessages(prev => prev.filter(p => p.id !== newMsg.id));
-    }
+    // Reload pinned messages from DB to ensure consistency
+    loadPinnedMessages();
   }
 
   function closePinReplaceModal() {
