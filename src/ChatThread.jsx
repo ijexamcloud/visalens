@@ -451,7 +451,7 @@ export default function ChatThread({ caseId, studentName, session: propSession }
     setReplyTo(null);
 
     const tags        = extractTags(text);
-    const mentionedIds = mentionedIds.length ? mentionedIds : null;
+    const finalMentionedIds = mentionedIds.length ? mentionedIds : null;
 
     // Optimistic insert — sender sees message immediately regardless of
     // realtime latency or RLS evaluation delay on the subscription payload
@@ -465,7 +465,7 @@ export default function ChatThread({ caseId, studentName, session: propSession }
       sender_color: senderColor(myName).color,
       content:      text,
       tags,
-      mentioned_ids: mentionedIds,
+      mentioned_ids: finalMentionedIds,
       reply_to_id:  currentReplyTo?.id || null,
       attachments:  [],
       is_deleted:   false,
@@ -482,7 +482,7 @@ export default function ChatThread({ caseId, studentName, session: propSession }
       sender_color:  senderColor(myName).color,
       content:       text,
       tags,
-      mentioned_ids: mentionedIds,
+      mentioned_ids: finalMentionedIds,
       reply_to_id:   currentReplyTo?.id || null,
       attachments:   [],
       is_deleted:    false,
@@ -1175,6 +1175,7 @@ export default function ChatThread({ caseId, studentName, session: propSession }
       <div style={{
         padding: '10px 12px', borderTop: replyTo ? 'none' : '1px solid var(--bd)',
         background: 'var(--s2)', flexShrink: 0, display: 'flex', gap: 8, alignItems: 'flex-end',
+        position: 'relative',
       }}>
         <textarea
           ref={inputRef}
